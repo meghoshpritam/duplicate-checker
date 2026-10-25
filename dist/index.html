@@ -95,6 +95,27 @@
             <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
           </div>
 
+          <div class="report-panel" id="reportPanel" hidden>
+            <div class="report-header">
+              <div>
+                <p class="eyebrow">SCAN REPORT</p>
+                <h4 id="reportTitle">Scan finished</h4>
+              </div>
+              <span class="report-status" id="reportStatus">READY</span>
+            </div>
+            <p class="report-detail" id="reportDetail"></p>
+            <div class="report-metrics">
+              <div><span>FILES FOUND</span><strong id="reportFiles">0</strong></div>
+              <div><span>CANDIDATES HASHED</span><strong id="reportHashed">0</strong></div>
+              <div><span>SKIPPED ITEMS</span><strong id="reportSkipped">0</strong></div>
+              <div><span>FOLDER BRANCHES</span><strong id="reportBranches">0</strong></div>
+            </div>
+            <div class="report-issues" id="reportIssues" hidden>
+              <div class="issues-heading"><span>READ ISSUES</span><span id="reportIssueCount"></span></div>
+              <ul id="reportIssueList"></ul>
+            </div>
+          </div>
+
           <div class="empty-state" id="emptyState">
             <div class="empty-illustration"><span></span><span></span><span></span><span></span></div>
             <h4>No duplicate groups yet</h4>

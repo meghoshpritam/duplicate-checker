@@ -18,6 +18,7 @@ const locationText = $('locationText');
 const locationDisplay = $('locationDisplay');
 const helperText = $('helperText');
 const progressWrap = $('progressWrap');
+const reportPanel = $('reportPanel');
 const groupsList = $('groupsList');
 const emptyState = $('emptyState');
 
@@ -49,6 +50,28 @@ function setProgress(text, percent) {
   $('progressText').textContent = text;
   $('progressPercent').textContent = `${Math.round(percent)}%`;
   $('progressBar').style.width = `${percent}%`;
+}
+
+function renderReport({ status, title, detail, filesFound, hashedCandidates, skippedItems, skippedBranches, issues = [] }) {
+  const safeIssues = issues.filter(Boolean);
+  reportPanel.hidden = false;
+  reportPanel.className = `report-panel status-${status}`;
+  $('reportTitle').textContent = title;
+  $('reportDetail').textContent = detail;
+  $('reportStatus').textContent = status === 'complete' ? 'COMPLETE' : status === 'warning' ? 'PARTIAL' : 'ERROR';
+  $('reportFiles').textContent = Number(filesFound || 0).toLocaleString();
+  $('reportHashed').textContent = Number(hashedCandidates || 0).toLocaleString();
+  $('reportSkipped').textContent = Number(skippedItems || 0).toLocaleString();
+  $('reportBranches').textContent = Number(skippedBranches || 0).toLocaleString();
+  $('reportIssueCount').textContent = safeIssues.length ? `${safeIssues.length} shown` : '';
+  const issueList = $('reportIssueList');
+  issueList.innerHTML = '';
+  safeIssues.slice(0, 10).forEach((issue) => {
+    const item = document.createElement('li');
+    item.textContent = issue;
+    issueList.appendChild(item);
+  });
+  $('reportIssues').hidden = safeIssues.length === 0;
 }
 
 function setFolderLabel(name, source) {
@@ -251,6 +274,7 @@ async function hashPotentialDuplicates(records, progress) {
   });
   const candidates = Array.from(bySize.values()).filter((bucket) => bucket.length > 1).flat();
   progress.hashCandidates = candidates.length;
+  progress.hashedCandidates = 0;
   progress.hashTotalBytes = candidates.reduce((total, record) => total + record.size, 0);
   progress.hashedBytes = 0;
   progress.hashIndex = 0;
@@ -260,6 +284,7 @@ async function hashPotentialDuplicates(records, progress) {
       const file = record.file || await record.fileHandle.getFile();
       progress.hashIndex += 1;
       record.hash = await digest(file, progress);
+      progress.hashedCandidates += 1;
     } catch (error) {
       progress.skipped += 1;
       progress.skippedExamples.push(record.path);
@@ -351,11 +376,12 @@ async function runScan() {
   emptyState.hidden = true;
   groupsList.hidden = true;
   progressWrap.hidden = false;
+  reportPanel.hidden = true;
   scanButton.disabled = true;
   deleteButton.disabled = true;
   setProgress('Preparing scan…', 4);
   const records = [];
-  const progress = { count: 0, skipped: 0, skippedDirectories: 0, skippedExamples: [], directories: 0, hashCandidates: 0, hashIndex: 0, hashTotalBytes: 0, hashedBytes: 0 };
+  const progress = { count: 0, skipped: 0, skippedDirectories: 0, skippedExamples: [], directories: 0, hashCandidates: 0, hashIndex: 0, hashedCandidates: 0, hashTotalBytes: 0, hashedBytes: 0 };
   try {
     if (state.source === 'picker' && state.folderHandle) await readDirectory(state.folderHandle, '', records, progress);
     if (state.source === 'input') await readInputFiles(state.inputFiles, records);
@@ -370,14 +396,50 @@ async function runScan() {
     const skipped = progress.skipped + progress.skippedDirectories;
     if (skipped) {
       helperText.textContent = `Scan complete. ${skipped.toLocaleString()} file${skipped === 1 ? '' : 's or folder branches'} could not be read and were skipped.`;
+      const issues = progress.skippedExamples.slice(0, 8).map((path) => `Could not read: ${path}`);
+      if (progress.skippedExamples.length > 8) issues.push(`…and ${(progress.skippedExamples.length - 8).toLocaleString()} more unreadable item${progress.skippedExamples.length - 8 === 1 ? '' : 's'}.`);
+      renderReport({
+        status: 'warning',
+        title: 'Scan completed with warnings',
+        detail: 'The readable portion of the location was checked. Some files or folder branches could not be opened, so duplicate results may be partial. No files were changed during the scan.',
+        filesFound: records.length,
+        hashedCandidates: progress.hashedCandidates,
+        skippedItems: progress.skipped,
+        skippedBranches: progress.skippedDirectories,
+        issues,
+      });
       setToast(`${state.groups.length ? `Found ${state.groups.length} duplicate group${state.groups.length === 1 ? '' : 's'}. ` : ''}${skipped} unreadable item${skipped === 1 ? '' : 's'} skipped.`);
     } else {
+      renderReport({
+        status: 'complete',
+        title: 'Scan completed successfully',
+        detail: 'All readable files were checked for exact content matches. No files were changed during the scan.',
+        filesFound: records.length,
+        hashedCandidates: progress.hashedCandidates,
+        skippedItems: 0,
+        skippedBranches: 0,
+      });
       setToast(state.groups.length ? `Found ${state.groups.length} duplicate group${state.groups.length === 1 ? '' : 's'}.` : 'No exact duplicates found. Nice and tidy.');
     }
   } catch (error) {
     console.error('Duplicate scan failed:', error);
-    setToast(`The scan could not finish: ${error.message || 'the drive stopped responding'}. Try again after reconnecting the drive.`, true);
-    emptyState.hidden = false;
+    state.records = records;
+    state.groups = makeGroups(records);
+    state.groups.forEach((group) => group.files.slice(1).forEach((record) => state.selected.add(record.id)));
+    renderGroups();
+    const errorName = error?.name ? `${error.name}: ` : '';
+    const errorMessage = error?.message || 'The drive stopped responding or access was interrupted.';
+    renderReport({
+      status: 'error',
+      title: 'Scan stopped before completion',
+      detail: `${errorName}${errorMessage} Some results may be partial. Reconnect the drive, close other apps using it, and scan again. No files were changed during the scan.`,
+      filesFound: records.length,
+      hashedCandidates: progress.hashedCandidates,
+      skippedItems: progress.skipped,
+      skippedBranches: progress.skippedDirectories,
+      issues: [`Error: ${errorName}${errorMessage}`, ...progress.skippedExamples.slice(0, 8).map((path) => `Could not read: ${path}`)],
+    });
+    setToast('The scan stopped. See the Scan Report below for details.', true);
   } finally {
     state.scanning = false;
     scanButton.disabled = false;
@@ -418,6 +480,7 @@ clearButton.addEventListener('click', () => {
   state.groups = [];
   state.selected.clear();
   state.inputFiles = [];
+  reportPanel.hidden = true;
   clearButton.hidden = true;
   progressWrap.hidden = true;
   renderGroups();
