@@ -6,6 +6,7 @@ const state = {
   selected: new Set(),
   scanning: false,
   toastTimer: null,
+  totalFilesFound: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -21,6 +22,10 @@ const progressWrap = $('progressWrap');
 const reportPanel = $('reportPanel');
 const groupsList = $('groupsList');
 const emptyState = $('emptyState');
+const nativePathInput = $('nativePathInput');
+const nativeScanButton = $('nativeScanButton');
+const nativeStatus = $('nativeStatus');
+const NATIVE_SCANNER_URL = 'http://127.0.0.1:4317';
 
 const supportsDirectoryPicker = 'showDirectoryPicker' in window;
 const HASH_CACHE_DB = 'duplicate-check-cache';
@@ -465,7 +470,8 @@ function makeGroups(records) {
 function updateStats() {
   const duplicateRecords = state.groups.flatMap((group) => group.files.slice(1));
   const selectedBytes = duplicateRecords.filter((record) => state.selected.has(record.id)).reduce((total, record) => total + record.size, 0);
-  $('filesStat').textContent = state.records.length ? state.records.length.toLocaleString() : '—';
+  const filesFound = state.totalFilesFound ?? state.records.length;
+  $('filesStat').textContent = filesFound ? filesFound.toLocaleString() : '—';
   $('duplicatesStat').textContent = state.groups.length ? duplicateRecords.length.toLocaleString() : '—';
   $('duplicateFoot').textContent = state.groups.length ? `${state.groups.length} matching group${state.groups.length === 1 ? '' : 's'}` : 'waiting for scan';
   $('spaceStat').textContent = state.groups.length ? formatBytes(selectedBytes) : '—';
@@ -545,6 +551,7 @@ async function runScan() {
   state.records = [];
   state.groups = [];
   state.selected.clear();
+  state.totalFilesFound = null;
   clearButton.hidden = true;
   $('liveStatus').hidden = false;
   $('liveStatus').innerHTML = '<i></i> Live results';
@@ -651,8 +658,194 @@ async function runScan() {
   }
 }
 
+function nativeRecordFromEvent(event) {
+  return {
+    id: `native:${event.absolutePath}`,
+    name: event.path.split('/').pop() || event.path,
+    path: event.path,
+    absolutePath: event.absolutePath,
+    size: event.size,
+    modified: event.modified,
+    hash: event.hash,
+    quickHash: null,
+    cached: Boolean(event.cached),
+    fileHandle: null,
+    parentHandle: null,
+  };
+}
+
+async function runNativeScan() {
+  const requestedPath = nativePathInput.value.trim();
+  if (!requestedPath) {
+    setToast('Enter the USB folder path first, for example /Volumes/My USB.', true);
+    nativePathInput.focus();
+    return;
+  }
+  if (state.scanning) return;
+  state.source = 'native';
+  state.folderHandle = null;
+  state.totalFilesFound = null;
+  state.scanning = true;
+  state.records = [];
+  state.groups = [];
+  state.selected.clear();
+  state.nativeRecords = new Map();
+  clearButton.hidden = true;
+  locationText.textContent = requestedPath;
+  locationDisplay.classList.add('selected');
+  helperText.textContent = 'The native scanner is reading the drive directly. Duplicate groups will appear as soon as hashes arrive.';
+  $('liveStatus').hidden = false;
+  $('liveStatus').innerHTML = '<i></i> Live native results';
+  emptyState.hidden = false;
+  groupsList.hidden = true;
+  progressWrap.hidden = false;
+  reportPanel.hidden = true;
+  scanButton.disabled = true;
+  deleteButton.disabled = true;
+  nativeScanButton.disabled = true;
+  nativeStatus.textContent = 'Scanning…';
+  nativeStatus.className = 'native-status connected';
+  setProgress('Connecting to native scanner…', 3);
+
+  const records = [];
+  const progress = { lastPublishAt: 0, lastGroupSignature: '', skipped: 0, skippedExamples: [], reusedHashes: 0, quickCandidates: 0, fullHashCandidates: 0, hashedCandidates: 0 };
+  let doneEvent = null;
+  try {
+    const response = await fetch(`${NATIVE_SCANNER_URL}/scan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: requestedPath }),
+    });
+    if (!response.ok || !response.body) {
+      const message = await response.text();
+      throw new Error(message || `Native scanner returned HTTP ${response.status}`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const handleEvent = (event) => {
+      if (event.type === 'start') {
+        setProgress('Native scan started…', 5);
+      } else if (event.type === 'file') {
+        const record = nativeRecordFromEvent(event);
+        const existing = state.nativeRecords.get(record.id);
+        if (!existing) {
+          state.nativeRecords.set(record.id, record);
+          records.push(record);
+        } else {
+          Object.assign(existing, record);
+        }
+        publishPartialResults(records, progress);
+      } else if (event.type === 'progress') {
+        const phaseLabel = event.phase === 'quick' ? 'Quick-checking' : 'Full-hashing';
+        const base = event.phase === 'quick' ? 8 : 52;
+        const range = event.phase === 'quick' ? 40 : 43;
+        setProgress(`${phaseLabel} ${event.current || 0} of ${event.total || 0}…`, base + ((event.current || 0) / Math.max(event.total || 1, 1)) * range);
+      } else if (event.type === 'warning') {
+        progress.skipped += 1;
+        progress.skippedExamples.push(event.path ? `${event.path}: ${event.message}` : event.message);
+      } else if (event.type === 'done') {
+        doneEvent = event;
+      }
+    };
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      lines.forEach((line) => {
+        if (!line.trim()) return;
+        try { handleEvent(JSON.parse(line)); } catch (parseError) { progress.skipped += 1; progress.skippedExamples.push(`Invalid native scanner event: ${parseError.message}`); }
+      });
+      if (done) break;
+    }
+    if (buffer.trim()) handleEvent(JSON.parse(buffer));
+    if (!doneEvent) throw new Error('Native scanner ended before sending a completion report.');
+    progress.reusedHashes = doneEvent.reusedHashes || 0;
+    progress.quickCandidates = doneEvent.quickCandidates || 0;
+    progress.fullHashCandidates = doneEvent.fullCandidates || 0;
+    progress.hashedCandidates = doneEvent.fullHashes || 0;
+    state.totalFilesFound = doneEvent.filesFound || 0;
+    state.records = records;
+    state.groups = makeGroups(records);
+    state.groups.forEach((group) => group.files.slice(1).forEach((record) => state.selected.add(record.id)));
+    publishPartialResults(records, progress, true);
+    setProgress(`Native scan complete · ${state.totalFilesFound.toLocaleString()} files checked`, 100);
+    clearButton.hidden = false;
+    const skipped = doneEvent.skipped || progress.skipped;
+    const issues = progress.skippedExamples.slice(0, 10);
+    renderReport({
+      status: skipped ? 'warning' : 'complete',
+      title: skipped ? 'Native scan completed with warnings' : 'Native scan completed successfully',
+      detail: `${progress.reusedHashes.toLocaleString()} unchanged hashes were reused. ${progress.quickCandidates.toLocaleString()} same-size files were quick-checked; ${progress.hashedCandidates.toLocaleString()} full hashes were performed. ${skipped ? 'Some items could not be read, so results may be partial.' : 'All readable files were checked.'} No files were changed during the scan.`,
+      filesFound: state.totalFilesFound,
+      reusedHashes: progress.reusedHashes,
+      hashedCandidates: progress.hashedCandidates,
+      skippedItems: skipped,
+      skippedBranches: 0,
+      issues,
+    });
+    nativeStatus.textContent = 'Native helper connected · ready';
+    nativeStatus.className = 'native-status connected';
+    setToast(state.groups.length ? `Found ${state.groups.length} duplicate group${state.groups.length === 1 ? '' : 's'} with the native scanner.` : 'No exact duplicates found. Nice and tidy.');
+  } catch (error) {
+    state.records = records;
+    state.groups = makeGroups(records);
+    state.groups.forEach((group) => group.files.slice(1).forEach((record) => state.selected.add(record.id)));
+    renderGroups();
+    clearButton.hidden = false;
+    renderReport({
+      status: 'error',
+      title: 'Native scan stopped before completion',
+      detail: `${error.message || 'The native helper could not read the requested path.'} Partial results are still shown below when available.`,
+      filesFound: state.totalFilesFound || 0,
+      reusedHashes: progress.reusedHashes,
+      hashedCandidates: progress.hashedCandidates,
+      skippedItems: progress.skipped,
+      skippedBranches: 0,
+      issues: [error.message || 'Native scanner connection failed.', ...progress.skippedExamples.slice(0, 8)],
+    });
+    nativeStatus.textContent = 'Native scanner error';
+    nativeStatus.className = 'native-status error';
+    setToast('The native scan stopped. See the Scan Report below.', true);
+  } finally {
+    state.scanning = false;
+    $('liveStatus').innerHTML = '<i></i> Final results';
+    nativeScanButton.disabled = false;
+    renderGroups();
+    updateStats();
+    setTimeout(() => { progressWrap.hidden = true; }, 900);
+  }
+}
+
+async function deleteNativeRecords(records) {
+  if (!records.length) return;
+  const confirmed = window.confirm(`Delete ${records.length} selected duplicate${records.length === 1 ? '' : 's'}? This permanently removes them from the drive.`);
+  if (!confirmed) return;
+  let deleted = 0;
+  for (const record of records) {
+    try {
+      const response = await fetch(`${NATIVE_SCANNER_URL}/delete`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: record.absolutePath }) });
+      if (!response.ok) throw new Error(await response.text());
+      state.records = state.records.filter((item) => item.id !== record.id);
+      state.selected.delete(record.id);
+      deleted += 1;
+    } catch (error) {
+      setToast(`Could not delete ${record.path}: ${error.message || 'native delete failed'}`, true);
+    }
+  }
+  state.groups = makeGroups(state.records);
+  state.groups.forEach((group) => group.files.slice(1).forEach((record) => state.selected.add(record.id)));
+  renderGroups();
+  setToast(deleted ? `${deleted} duplicate${deleted === 1 ? '' : 's'} deleted.` : 'No files were deleted.', deleted === 0);
+}
+
 async function deleteRecords(records) {
   if (!records.length) return;
+  if (state.source === 'native') {
+    await deleteNativeRecords(records);
+    return;
+  }
   if (!state.folderHandle) {
     setToast('Deletion needs folder permission. Choose the folder with Chrome or Edge, then scan again.', true);
     return;
@@ -676,6 +869,23 @@ async function deleteRecords(records) {
   setToast(deleted ? `${deleted} duplicate${deleted === 1 ? '' : 's'} deleted.` : 'No files were deleted.', deleted === 0);
 }
 
+async function checkNativeScanner() {
+  try {
+    const response = await fetch(`${NATIVE_SCANNER_URL}/health`, { signal: AbortSignal.timeout(1200) });
+    if (!response.ok) throw new Error('offline');
+    const info = await response.json();
+    nativeStatus.textContent = `Native helper connected · ${info.workers || 1} workers`;
+    nativeStatus.className = 'native-status connected';
+  } catch (error) {
+    nativeStatus.textContent = 'Native helper not connected · start it from README';
+    nativeStatus.className = 'native-status';
+  }
+}
+
+nativeScanButton.addEventListener('click', runNativeScan);
+nativePathInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') runNativeScan();
+});
 scanButton.addEventListener('click', runScan);
 deleteButton.addEventListener('click', () => deleteRecords(state.groups.flatMap((group) => group.files.filter((file) => state.selected.has(file.id)))));
 clearButton.addEventListener('click', () => {
@@ -683,6 +893,7 @@ clearButton.addEventListener('click', () => {
   state.groups = [];
   state.selected.clear();
   state.inputFiles = [];
+  state.totalFilesFound = null;
   reportPanel.hidden = true;
   $('liveStatus').hidden = true;
   clearButton.hidden = true;
@@ -692,3 +903,4 @@ clearButton.addEventListener('click', () => {
 });
 
 updateStats();
+checkNativeScanner();
