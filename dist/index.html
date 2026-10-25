@@ -87,7 +87,10 @@
               <p class="eyebrow">02 / REVIEW MATCHES</p>
               <h3>Duplicate groups <span id="groupCount">0</span></h3>
             </div>
-            <button class="button button-danger" id="deleteButton" type="button" disabled><span>×</span> Delete selected</button>
+            <div class="results-header-actions">
+              <span class="live-status" id="liveStatus" hidden><i></i> Live results</span>
+              <button class="button button-danger" id="deleteButton" type="button" disabled><span>×</span> Delete selected</button>
+            </div>
           </div>
 
           <div class="progress-wrap" id="progressWrap" hidden>
@@ -106,7 +109,8 @@
             <p class="report-detail" id="reportDetail"></p>
             <div class="report-metrics">
               <div><span>FILES FOUND</span><strong id="reportFiles">0</strong></div>
-              <div><span>CANDIDATES HASHED</span><strong id="reportHashed">0</strong></div>
+              <div><span>REUSED HASHES</span><strong id="reportReused">0</strong></div>
+              <div><span>FULL HASHES</span><strong id="reportHashed">0</strong></div>
               <div><span>SKIPPED ITEMS</span><strong id="reportSkipped">0</strong></div>
               <div><span>FOLDER BRANCHES</span><strong id="reportBranches">0</strong></div>
             </div>
@@ -118,8 +122,8 @@
 
           <div class="empty-state" id="emptyState">
             <div class="empty-illustration"><span></span><span></span><span></span><span></span></div>
-            <h4>No duplicate groups yet</h4>
-            <p>Select a folder above and start a scan. Identical files will be grouped by content, not just filename.</p>
+            <h4 id="emptyTitle">No duplicate groups yet</h4>
+            <p id="emptyCopy">Select a folder above and start a scan. Identical files will be grouped by content, not just filename.</p>
           </div>
 
           <div class="groups-list" id="groupsList" hidden></div>

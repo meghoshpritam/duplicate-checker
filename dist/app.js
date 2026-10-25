@@ -23,6 +23,59 @@ const groupsList = $('groupsList');
 const emptyState = $('emptyState');
 
 const supportsDirectoryPicker = 'showDirectoryPicker' in window;
+const HASH_CACHE_DB = 'duplicate-check-cache';
+const HASH_CACHE_VERSION = 1;
+let hashCacheDbPromise = null;
+let pendingCacheWrites = [];
+
+function openHashCache() {
+  if (!('indexedDB' in window)) return Promise.resolve(null);
+  if (!hashCacheDbPromise) {
+    hashCacheDbPromise = new Promise((resolve, reject) => {
+      const request = window.indexedDB.open(HASH_CACHE_DB, HASH_CACHE_VERSION);
+      request.onupgradeneeded = () => {
+        const store = request.result.createObjectStore('hashes', { keyPath: 'key' });
+        store.createIndex('rootId', 'rootId', { unique: false });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+  return hashCacheDbPromise;
+}
+
+async function loadHashCache(rootId) {
+  const db = await openHashCache();
+  if (!db) return new Map();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction('hashes', 'readonly').objectStore('hashes').index('rootId').getAll(rootId);
+    request.onsuccess = () => resolve(new Map(request.result.map((entry) => [entry.path, entry])));
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function queueHashCacheWrite(entry) {
+  pendingCacheWrites.push(entry);
+}
+
+async function flushHashCacheWrites() {
+  if (!pendingCacheWrites.length) return;
+  const db = await openHashCache();
+  if (!db) return;
+  const writes = pendingCacheWrites.splice(0);
+  await new Promise((resolve, reject) => {
+    const transaction = db.transaction('hashes', 'readwrite');
+    const store = transaction.objectStore('hashes');
+    writes.forEach((entry) => store.put(entry));
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+function rootCacheId() {
+  const inputRoot = state.inputFiles?.[0]?.webkitRelativePath?.split('/')[0];
+  return `${state.source || 'unknown'}:${state.folderHandle?.name || inputRoot || locationText.textContent}`;
+}
 
 function formatBytes(bytes) {
   if (!bytes) return '0 B';
@@ -52,7 +105,7 @@ function setProgress(text, percent) {
   $('progressBar').style.width = `${percent}%`;
 }
 
-function renderReport({ status, title, detail, filesFound, hashedCandidates, skippedItems, skippedBranches, issues = [] }) {
+function renderReport({ status, title, detail, filesFound, reusedHashes, hashedCandidates, skippedItems, skippedBranches, issues = [] }) {
   const safeIssues = issues.filter(Boolean);
   reportPanel.hidden = false;
   reportPanel.className = `report-panel status-${status}`;
@@ -60,6 +113,7 @@ function renderReport({ status, title, detail, filesFound, hashedCandidates, ski
   $('reportDetail').textContent = detail;
   $('reportStatus').textContent = status === 'complete' ? 'COMPLETE' : status === 'warning' ? 'PARTIAL' : 'ERROR';
   $('reportFiles').textContent = Number(filesFound || 0).toLocaleString();
+  $('reportReused').textContent = Number(reusedHashes || 0).toLocaleString();
   $('reportHashed').textContent = Number(hashedCandidates || 0).toLocaleString();
   $('reportSkipped').textContent = Number(skippedItems || 0).toLocaleString();
   $('reportBranches').textContent = Number(skippedBranches || 0).toLocaleString();
@@ -81,6 +135,10 @@ function setFolderLabel(name, source) {
   helperText.textContent = source === 'picker'
     ? 'Folder access is enabled for this session. You can delete duplicates after reviewing them.'
     : 'Folder selected. Scan results are read-only in this browser fallback; use Choose folder in Chrome or Edge to enable deletion.';
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[character]));
 }
 
 chooseButton.addEventListener('click', async () => {
@@ -192,7 +250,48 @@ function pauseForUsb() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+const QUICK_SAMPLE_BYTES = 64 * 1024;
+const FAST_HASH_LIMIT = 64 * 1024 * 1024;
+
+function bytesToHex(bytes) {
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function digestBytes(bytes) {
+  return bytesToHex(await crypto.subtle.digest('SHA-256', bytes));
+}
+
+async function quickFingerprint(file, progress) {
+  let sample;
+  if (file.size <= QUICK_SAMPLE_BYTES * 2) {
+    sample = new Uint8Array(await file.arrayBuffer());
+  } else {
+    const first = new Uint8Array(await file.slice(0, QUICK_SAMPLE_BYTES).arrayBuffer());
+    const last = new Uint8Array(await file.slice(file.size - QUICK_SAMPLE_BYTES, file.size).arrayBuffer());
+    sample = new Uint8Array(first.length + last.length);
+    sample.set(first, 0);
+    sample.set(last, first.length);
+  }
+  progress.quickBytes += sample.byteLength;
+  progress.quickIndex += 1;
+  setProgress(`Quick-checking ${progress.quickIndex} of ${progress.quickCandidates} same-size files…`, 42 + (progress.quickIndex / Math.max(progress.quickCandidates, 1)) * 12);
+  await pauseForUsb();
+  return digestBytes(sample);
+}
+
 async function digest(file, progress) {
+  progress.hashIndex += 1;
+  // Web Crypto is much faster for ordinary files. Keep the chunked fallback
+  // for large files so one huge video/archive never needs a huge allocation.
+  if (file.size <= FAST_HASH_LIMIT) {
+    const data = new Uint8Array(await file.arrayBuffer());
+    progress.hashedBytes += data.byteLength;
+    setProgress(`Full-hashing ${progress.hashIndex} of ${progress.fullHashCandidates} files…`, 54 + (progress.hashedBytes / Math.max(progress.hashTotalBytes, 1)) * 41);
+    const hash = await digestBytes(data);
+    await pauseForUsb();
+    return hash;
+  }
+
   const hasher = new Sha256();
   const chunkSize = 8 * 1024 * 1024;
   for (let offset = 0; offset < file.size; offset += chunkSize) {
@@ -200,7 +299,7 @@ async function digest(file, progress) {
     hasher.update(chunk);
     progress.hashedBytes += chunk.byteLength;
     if (progress.hashTotalBytes) {
-      setProgress(`Checking ${progress.hashIndex} of ${progress.hashCandidates} possible matches…`, 45 + (progress.hashedBytes / progress.hashTotalBytes) * 50);
+      setProgress(`Full-hashing ${progress.hashIndex} of ${progress.fullHashCandidates} files…`, 54 + (progress.hashedBytes / progress.hashTotalBytes) * 41);
     }
     // Yield between chunks so the browser stays responsive while reading a USB drive.
     await pauseForUsb();
@@ -219,7 +318,7 @@ async function readDirectory(handle, parentPath, records, progress) {
       }
       try {
         const file = await entry.getFile();
-        records.push({
+        const record = {
           id: `file-${records.length}`,
           name: entry.name,
           path,
@@ -228,8 +327,17 @@ async function readDirectory(handle, parentPath, records, progress) {
           hash: null,
           fileHandle: entry,
           parentHandle: handle,
-        });
+        };
+        const cached = progress.cache.get(path);
+        if (cached && cached.size === file.size && cached.modified === file.lastModified && cached.hash) {
+          record.hash = cached.hash;
+          record.quickHash = cached.quickHash || null;
+          record.cached = true;
+          progress.reusedHashes += 1;
+        }
+        records.push(record);
         progress.count += 1;
+        if (record.cached) publishPartialResults(records, progress);
         if (progress.count % 25 === 0) {
           setProgress(`Found ${progress.count.toLocaleString()} files…`, Math.min(42, 6 + Math.log10(progress.count + 1) * 14));
           await pauseForUsb();
@@ -247,20 +355,30 @@ async function readDirectory(handle, parentPath, records, progress) {
   }
 }
 
-async function readInputFiles(files, records) {
+async function readInputFiles(files, records, progress) {
   for (let index = 0; index < files.length; index += 1) {
     const file = files[index];
-    records.push({
+    const path = file.webkitRelativePath || file.name;
+    const record = {
       id: `file-${index}`,
       name: file.name,
-      path: file.webkitRelativePath || file.name,
+      path,
       size: file.size,
       modified: file.lastModified,
       hash: null,
       file,
       fileHandle: null,
       parentHandle: null,
-    });
+    };
+    const cached = progress.cache.get(path);
+    if (cached && cached.size === file.size && cached.modified === file.lastModified && cached.hash) {
+      record.hash = cached.hash;
+      record.quickHash = cached.quickHash || null;
+      record.cached = true;
+      progress.reusedHashes += 1;
+    }
+    records.push(record);
+    if (record.cached) publishPartialResults(records, progress);
     if ((index + 1) % 25 === 0) await pauseForUsb();
   }
 }
@@ -273,18 +391,54 @@ async function hashPotentialDuplicates(records, progress) {
     bySize.get(key).push(record);
   });
   const candidates = Array.from(bySize.values()).filter((bucket) => bucket.length > 1).flat();
-  progress.hashCandidates = candidates.length;
+  progress.quickCandidates = candidates.filter((record) => !record.quickHash).length;
+  progress.quickIndex = 0;
+  progress.quickBytes = 0;
   progress.hashedCandidates = 0;
-  progress.hashTotalBytes = candidates.reduce((total, record) => total + record.size, 0);
+  progress.fullHashCandidates = 0;
+  progress.hashTotalBytes = 0;
   progress.hashedBytes = 0;
   progress.hashIndex = 0;
   if (!candidates.length) return;
+
+  const byQuickFingerprint = new Map();
   for (const record of candidates) {
     try {
-      const file = record.file || await record.fileHandle.getFile();
-      progress.hashIndex += 1;
-      record.hash = await digest(file, progress);
+      if (!record.quickHash) {
+        const file = record.file || await record.fileHandle.getFile();
+        record.file = file;
+        record.quickHash = await quickFingerprint(file, progress);
+      }
+      const key = `${record.size}:${record.quickHash}`;
+      if (!byQuickFingerprint.has(key)) byQuickFingerprint.set(key, []);
+      byQuickFingerprint.get(key).push(record);
+    } catch (error) {
+      progress.skipped += 1;
+      progress.skippedExamples.push(record.path);
+    }
+  }
+
+  const fullCandidates = Array.from(byQuickFingerprint.values()).filter((bucket) => bucket.length > 1).flat();
+  const newFullCandidates = fullCandidates.filter((record) => !record.hash);
+  progress.fullHashCandidates = newFullCandidates.length;
+  progress.hashCandidates = newFullCandidates.length;
+  progress.hashTotalBytes = newFullCandidates.reduce((total, record) => total + record.size, 0);
+  for (const record of newFullCandidates) {
+    try {
+      record.hash = await digest(record.file, progress);
       progress.hashedCandidates += 1;
+      record.cached = false;
+      queueHashCacheWrite({
+        key: `${progress.rootId}|${record.path}`,
+        rootId: progress.rootId,
+        path: record.path,
+        size: record.size,
+        modified: record.modified,
+        quickHash: record.quickHash,
+        hash: record.hash,
+        savedAt: Date.now(),
+      });
+      publishPartialResults(records, progress);
     } catch (error) {
       progress.skipped += 1;
       progress.skippedExamples.push(record.path);
@@ -319,11 +473,28 @@ function updateStats() {
   deleteButton.disabled = state.selected.size === 0 || state.scanning;
 }
 
+function publishPartialResults(records, progress, force = false) {
+  const nextGroups = makeGroups(records);
+  const signature = nextGroups.map((group) => `${group.hash}:${group.files.length}`).join('|');
+  const now = performance.now();
+  if (!force && signature === progress.lastGroupSignature) return;
+  if (!force && now - progress.lastPublishAt < 250) return;
+  state.records = records;
+  state.groups = nextGroups;
+  state.selected.clear();
+  state.groups.forEach((group) => group.files.slice(1).forEach((record) => state.selected.add(record.id)));
+  progress.lastGroupSignature = signature;
+  progress.lastPublishAt = now;
+  renderGroups();
+}
+
 function renderGroups() {
   groupsList.innerHTML = '';
   if (!state.groups.length) {
     groupsList.hidden = true;
     emptyState.hidden = false;
+    $('emptyTitle').textContent = state.scanning ? 'Scanning for duplicates…' : 'No duplicate groups yet';
+    $('emptyCopy').textContent = state.scanning ? 'Results will appear here as files finish their checks.' : 'Select a folder above and start a scan. Identical files will be grouped by content, not just filename.';
     updateStats();
     return;
   }
@@ -344,12 +515,14 @@ function renderGroups() {
       const isKeep = fileIndex === 0;
       const row = document.createElement('div');
       row.className = `file-row${isKeep ? ' is-keep' : ''}`;
+      const hashLabel = record.hash ? `${record.hash.slice(0, 18)}…` : 'hash pending';
+      const cachedClass = record.cached ? ' cached' : '';
       row.innerHTML = `
-        <input class="file-check" type="checkbox" ${isKeep ? 'disabled' : ''} ${state.selected.has(record.id) ? 'checked' : ''} aria-label="Select ${record.name}" />
-        <div class="file-main"><span class="file-icon">▧</span><div><div class="file-name" title="${record.name}">${record.name}</div><span class="file-path" title="${record.path}">${record.path}</span></div></div>
+        <input class="file-check" type="checkbox" ${isKeep || state.scanning ? 'disabled' : ''} ${state.selected.has(record.id) ? 'checked' : ''} aria-label="Select ${escapeHtml(record.name)}" />
+        <div class="file-main"><span class="file-icon">▧</span><div><div class="file-name" title="${escapeHtml(record.name)}">${escapeHtml(record.name)}</div><span class="file-path" title="${escapeHtml(record.path)}">${escapeHtml(record.path)}</span><span class="file-hash${cachedClass}" title="${record.hash || ''}">sha256 ${hashLabel}</span></div></div>
         <span class="file-size">${formatBytes(record.size)}</span>
         <span class="file-date">${formatDate(record.modified)}</span>
-        ${isKeep ? '<span class="keep-label">Keep original</span>' : '<button class="delete-one" type="button">Delete</button>'}
+        ${isKeep ? '<span class="keep-label">Keep original</span>' : `<button class="delete-one" type="button" ${state.scanning ? 'disabled' : ''}>Delete</button>`}
       `;
       if (!isKeep) {
         const checkbox = row.querySelector('.file-check');
@@ -373,7 +546,9 @@ async function runScan() {
   state.groups = [];
   state.selected.clear();
   clearButton.hidden = true;
-  emptyState.hidden = true;
+  $('liveStatus').hidden = false;
+  $('liveStatus').innerHTML = '<i></i> Live results';
+  emptyState.hidden = false;
   groupsList.hidden = true;
   progressWrap.hidden = false;
   reportPanel.hidden = true;
@@ -381,28 +556,46 @@ async function runScan() {
   deleteButton.disabled = true;
   setProgress('Preparing scan…', 4);
   const records = [];
-  const progress = { count: 0, skipped: 0, skippedDirectories: 0, skippedExamples: [], directories: 0, hashCandidates: 0, hashIndex: 0, hashedCandidates: 0, hashTotalBytes: 0, hashedBytes: 0 };
+  const progress = { count: 0, skipped: 0, skippedDirectories: 0, skippedExamples: [], directories: 0, quickCandidates: 0, quickIndex: 0, quickBytes: 0, fullHashCandidates: 0, hashCandidates: 0, hashIndex: 0, hashedCandidates: 0, hashTotalBytes: 0, hashedBytes: 0, reusedHashes: 0, cache: new Map(), rootId: rootCacheId(), lastPublishAt: 0, lastGroupSignature: '' };
   try {
+    try {
+      progress.cache = await loadHashCache(progress.rootId);
+    } catch (cacheError) {
+      progress.cacheWarning = cacheError?.message || 'Saved hash history was unavailable for this scan.';
+    }
     if (state.source === 'picker' && state.folderHandle) await readDirectory(state.folderHandle, '', records, progress);
-    if (state.source === 'input') await readInputFiles(state.inputFiles, records);
+    if (state.source === 'input') await readInputFiles(state.inputFiles, records, progress);
+    state.records = records;
+    publishPartialResults(records, progress, true);
     setProgress(`Found ${records.length.toLocaleString()} files. Checking possible duplicates…`, 45);
     await hashPotentialDuplicates(records, progress);
     state.records = records;
     state.groups = makeGroups(records);
     state.groups.forEach((group) => group.files.slice(1).forEach((record) => state.selected.add(record.id)));
     setProgress(`Scan complete · ${records.length} files checked`, 100);
+    publishPartialResults(records, progress, true);
+    try {
+      await flushHashCacheWrites();
+    } catch (cacheError) {
+      progress.cacheWarning = cacheError?.message || 'New hashes could not be saved for the next scan.';
+    }
     renderGroups();
     clearButton.hidden = false;
     const skipped = progress.skipped + progress.skippedDirectories;
-    if (skipped) {
-      helperText.textContent = `Scan complete. ${skipped.toLocaleString()} file${skipped === 1 ? '' : 's or folder branches'} could not be read and were skipped.`;
+    const filterSummary = `${progress.reusedHashes.toLocaleString()} unchanged hashes were reused. ${progress.quickCandidates ? `${progress.quickCandidates.toLocaleString()} same-size files were quick-checked; ${progress.fullHashCandidates.toLocaleString()} needed full hashing.` : 'No new same-size candidates needed hashing.'}`;
+    if (skipped || progress.cacheWarning) {
+      helperText.textContent = skipped
+        ? `Scan complete. ${skipped.toLocaleString()} file${skipped === 1 ? '' : 's or folder branches'} could not be read and were skipped.`
+        : 'Scan complete. The file scan succeeded, but saved hash tracking was unavailable for this run.';
       const issues = progress.skippedExamples.slice(0, 8).map((path) => `Could not read: ${path}`);
       if (progress.skippedExamples.length > 8) issues.push(`…and ${(progress.skippedExamples.length - 8).toLocaleString()} more unreadable item${progress.skippedExamples.length - 8 === 1 ? '' : 's'}.`);
+      if (progress.cacheWarning) issues.push(`Hash tracking: ${progress.cacheWarning}`);
       renderReport({
         status: 'warning',
         title: 'Scan completed with warnings',
-        detail: 'The readable portion of the location was checked. Some files or folder branches could not be opened, so duplicate results may be partial. No files were changed during the scan.',
+        detail: `The readable portion of the location was checked. ${filterSummary} Some files or folder branches could not be opened, so duplicate results may be partial. No files were changed during the scan.`,
         filesFound: records.length,
+        reusedHashes: progress.reusedHashes,
         hashedCandidates: progress.hashedCandidates,
         skippedItems: progress.skipped,
         skippedBranches: progress.skippedDirectories,
@@ -413,8 +606,9 @@ async function runScan() {
       renderReport({
         status: 'complete',
         title: 'Scan completed successfully',
-        detail: 'All readable files were checked for exact content matches. No files were changed during the scan.',
+        detail: `All readable files were checked for exact content matches. ${filterSummary} No files were changed during the scan.`,
         filesFound: records.length,
+        reusedHashes: progress.reusedHashes,
         hashedCandidates: progress.hashedCandidates,
         skippedItems: 0,
         skippedBranches: 0,
@@ -434,15 +628,24 @@ async function runScan() {
       title: 'Scan stopped before completion',
       detail: `${errorName}${errorMessage} Some results may be partial. Reconnect the drive, close other apps using it, and scan again. No files were changed during the scan.`,
       filesFound: records.length,
+      reusedHashes: progress.reusedHashes,
       hashedCandidates: progress.hashedCandidates,
       skippedItems: progress.skipped,
       skippedBranches: progress.skippedDirectories,
       issues: [`Error: ${errorName}${errorMessage}`, ...progress.skippedExamples.slice(0, 8).map((path) => `Could not read: ${path}`)],
     });
+    clearButton.hidden = false;
     setToast('The scan stopped. See the Scan Report below for details.', true);
   } finally {
     state.scanning = false;
+    $('liveStatus').innerHTML = '<i></i> Final results';
     scanButton.disabled = false;
+    renderGroups();
+    try {
+      await flushHashCacheWrites();
+    } catch (cacheError) {
+      // The scan results remain valid even if the local history cannot be saved.
+    }
     updateStats();
     setTimeout(() => { progressWrap.hidden = true; }, 900);
   }
@@ -481,6 +684,7 @@ clearButton.addEventListener('click', () => {
   state.selected.clear();
   state.inputFiles = [];
   reportPanel.hidden = true;
+  $('liveStatus').hidden = true;
   clearButton.hidden = true;
   progressWrap.hidden = true;
   renderGroups();

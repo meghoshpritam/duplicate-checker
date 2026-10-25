@@ -14,6 +14,8 @@ Then open http://localhost:4173.
 
 Files are read and hashed in the browser. The app does not upload file contents. Chrome and Edge support the full choose-and-delete flow; the directory input fallback can scan but is read-only.
 
-The scanner is designed for large removable drives: it first compares file sizes, hashes only same-size candidates, reads candidate files in 8 MB chunks, yields to the browser between chunks, and skips unreadable files or folder branches instead of aborting the entire scan.
+The scanner is designed for large removable drives: it first compares file sizes, reads a small first/last-chunk fingerprint for same-size candidates, performs full SHA-256 hashing only for candidates that survive that filter, uses Web Crypto for files up to 64 MB, reads larger candidates in 8 MB chunks, yields to the browser between chunks, and skips unreadable files or folder branches instead of aborting the entire scan.
 
 Every scan ends with a persistent report showing the outcome, files found, candidates hashed, skipped items, skipped folder branches, and representative read errors. Partial duplicate results remain visible when possible.
+
+The app also keeps a local IndexedDB hash index keyed by the selected root, relative file path, file size, and last-modified timestamp. On later scans, unchanged files reuse their stored hash and are marked `cached` in the results; changed or new files are checked again. Duplicate groups appear while the scan is still running, then switch to final results when complete.
