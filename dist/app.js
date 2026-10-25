@@ -592,13 +592,73 @@ function makeGroups(records) {
     .map(([hash, files], index) => {
       const sortedFiles = files.sort((a, b) => a.path.localeCompare(b.path));
       const originalId = state.originals.get(hash);
-      const originalIndex = originalId ? sortedFiles.findIndex((record) => record.id === originalId) : -1;
-      if (originalIndex > 0) {
-        const [original] = sortedFiles.splice(originalIndex, 1);
-        sortedFiles.unshift(original);
+      let originalReason = 'earliest modified';
+      if (originalId) {
+        const originalIndex = sortedFiles.findIndex((record) => record.id === originalId);
+        if (originalIndex >= 0) {
+          const [original] = sortedFiles.splice(originalIndex, 1);
+          sortedFiles.unshift(original);
+          originalReason = 'chosen by you';
+        }
       }
-      return { id: `group-${index}`, hash, files: sortedFiles };
+      if (!originalId || originalReason !== 'chosen by you') {
+        const choice = chooseOriginal(sortedFiles);
+        const choiceIndex = sortedFiles.findIndex((record) => record.id === choice.record.id);
+        if (choiceIndex > 0) {
+          const [original] = sortedFiles.splice(choiceIndex, 1);
+          sortedFiles.unshift(original);
+        }
+        originalReason = choice.reason;
+      }
+      return { id: `group-${index}`, hash, files: sortedFiles, originalReason };
     });
+}
+
+function analyzeDuplicateName(record) {
+  const name = record.name || record.path.split(/[\\/]/).pop() || '';
+  const extensionIndex = name.lastIndexOf('.');
+  const stem = extensionIndex > 0 ? name.slice(0, extensionIndex) : name;
+  const patterns = [
+    { regex: /\s*\(\s*(\d+)\s*\)$/i, kind: 'numbered copy' },
+    { regex: /(?:\s+|[-_]\s*)copy(?:\s*\(\s*(\d+)\s*\)|\s+(\d+))?$/i, kind: 'copy suffix' },
+    { regex: /\s+(\d+)$/i, kind: 'numbered copy' },
+  ];
+  for (const pattern of patterns) {
+    const match = stem.match(pattern.regex);
+    if (!match) continue;
+    const base = stem.slice(0, match.index).trim();
+    if (!base) continue;
+    const number = Number(match.slice(1).find(Boolean) || 1);
+    return { base: base.replace(/[\s_-]+/g, ' ').toLowerCase(), hasSuffix: true, rank: number, kind: pattern.kind };
+  }
+  const copyOf = stem.match(/^copy\s+of\s+(.+)$/i);
+  if (copyOf) return { base: copyOf[1].replace(/[\s_-]+/g, ' ').toLowerCase(), hasSuffix: true, rank: 1, kind: 'copy prefix' };
+  return { base: stem.replace(/[\s_-]+/g, ' ').toLowerCase(), hasSuffix: false, rank: 0, kind: 'clean filename' };
+}
+
+function chooseOriginal(files) {
+  const analyzed = files.map((record) => ({ record, analysis: analyzeDuplicateName(record) }));
+  const familyCounts = new Map();
+  analyzed.forEach(({ analysis }) => familyCounts.set(analysis.base, (familyCounts.get(analysis.base) || 0) + 1));
+  analyzed.sort((first, second) => {
+    const firstVariant = first.analysis.hasSuffix && familyCounts.get(first.analysis.base) > 1;
+    const secondVariant = second.analysis.hasSuffix && familyCounts.get(second.analysis.base) > 1;
+    if (firstVariant !== secondVariant) return firstVariant ? 1 : -1;
+    if (firstVariant && first.analysis.rank !== second.analysis.rank) return first.analysis.rank - second.analysis.rank;
+    const firstModified = first.record.modified || Number.MAX_SAFE_INTEGER;
+    const secondModified = second.record.modified || Number.MAX_SAFE_INTEGER;
+    if (firstModified !== secondModified) return firstModified - secondModified;
+    const firstDepth = first.record.path.split(/[\\/]/).length;
+    const secondDepth = second.record.path.split(/[\\/]/).length;
+    if (firstDepth !== secondDepth) return firstDepth - secondDepth;
+    return first.record.path.localeCompare(second.record.path, undefined, { numeric: true, sensitivity: 'base' });
+  });
+  const chosen = analyzed[0];
+  const familyHasCleanName = familyCounts.get(chosen.analysis.base) > 1 && !chosen.analysis.hasSuffix;
+  return {
+    record: chosen.record,
+    reason: familyHasCleanName ? 'clean filename' : chosen.analysis.hasSuffix ? chosen.analysis.kind : 'earliest modified',
+  };
 }
 
 function updateStats() {
@@ -675,7 +735,7 @@ async function openNativeRecord(record) {
   }
 }
 
-function createFileRow(record, isKeep) {
+function createFileRow(record, isKeep, keepReason = '') {
   const row = document.createElement('div');
   row.className = `file-row${isKeep ? ' is-keep' : ''}`;
   const hashLabel = record.hash ? `${record.hash.slice(0, 18)}…` : 'hash pending';
@@ -685,7 +745,7 @@ function createFileRow(record, isKeep) {
     <div class="file-main"><span class="file-icon">▧</span><div><div class="file-name" title="${escapeHtml(record.name)}">${escapeHtml(record.name)}</div><span class="file-path" title="${escapeHtml(record.path)}">${escapeHtml(record.path)}</span><span class="file-hash${cachedClass}" title="${record.hash || ''}">sha256 ${hashLabel}</span></div></div>
     <span class="file-size">${formatBytes(record.size)}</span>
     <span class="file-date">${formatDate(record.modified)}</span>
-    <div class="file-actions"><button class="open-one" type="button" aria-label="Open ${escapeHtml(record.name)} in a new tab" ${state.scanning && state.source === 'native' ? 'disabled' : ''}>Open tab</button>${state.source === 'native' ? `<button class="open-native" type="button" aria-label="Open ${escapeHtml(record.name)} in the native app" ${state.scanning ? 'disabled' : ''}>Open app</button>` : ''}${isKeep ? '<span class="keep-label">Keep original</span>' : `<button class="set-original" type="button" aria-label="Set ${escapeHtml(record.name)} as original" ${state.scanning ? 'disabled' : ''}>Set original</button><button class="delete-one" type="button" ${state.scanning ? 'disabled' : ''}>Delete</button>`}</div>
+    <div class="file-actions"><button class="open-one" type="button" aria-label="Open ${escapeHtml(record.name)} in a new tab" ${state.scanning && state.source === 'native' ? 'disabled' : ''}>Open tab</button>${state.source === 'native' ? `<button class="open-native" type="button" aria-label="Open ${escapeHtml(record.name)} in the native app" ${state.scanning ? 'disabled' : ''}>Open app</button>` : ''}${isKeep ? `<span class="keep-label" title="${escapeHtml(keepReason || 'Smart filename and timestamp match')}">Keep original</span>` : `<button class="set-original" type="button" aria-label="Set ${escapeHtml(record.name)} as original" ${state.scanning ? 'disabled' : ''}>Set original</button><button class="delete-one" type="button" ${state.scanning ? 'disabled' : ''}>Delete</button>`}</div>
   `;
   row.querySelector('.open-one').addEventListener('click', () => openRecord(record));
   row.querySelector('.open-native')?.addEventListener('click', () => openNativeRecord(record));
@@ -706,6 +766,7 @@ function setOriginalForRecord(record) {
   if (!group || group.files[0]?.id === record.id) return;
   state.originals.set(group.hash, record.id);
   group.files = [record, ...group.files.filter((item) => item.id !== record.id)];
+  group.originalReason = 'chosen by you';
   group.files.forEach((item) => state.selected.delete(item.id));
   group.files.slice(1).forEach((item) => state.selected.add(item.id));
   renderGroups();
@@ -733,7 +794,7 @@ function renderTreeView(visibleGroups, totalGroups = visibleGroups.length) {
         if (!node.children.has(part)) node.children.set(part, { name: part, children: new Map(), files: [] });
         node = node.children.get(part);
       });
-      node.files.push({ record: { ...record, name: fileName }, isKeep: fileIndex === 0, groupIndex });
+      node.files.push({ record: { ...record, name: fileName }, isKeep: fileIndex === 0, groupIndex, originalReason: group.originalReason });
     });
   });
 
@@ -758,8 +819,8 @@ function renderTreeView(visibleGroups, totalGroups = visibleGroups.length) {
       container.appendChild(details);
       renderNode(child, branch);
     });
-    node.files.sort((a, b) => compareTreeRecords(a.record, b.record)).forEach(({ record, isKeep, groupIndex }) => {
-      const row = createFileRow(record, isKeep);
+    node.files.sort((a, b) => compareTreeRecords(a.record, b.record)).forEach(({ record, isKeep, groupIndex, originalReason }) => {
+      const row = createFileRow(record, isKeep, originalReason);
       row.classList.add('tree-file-row');
       const match = document.createElement('span');
       match.className = 'tree-match';
@@ -805,10 +866,10 @@ function renderGroups() {
       card.innerHTML = `
         <div class="group-header">
           <div class="group-title"><strong>Match ${String(groupIndex + 1).padStart(2, '0')}</strong><span class="hash">${group.hash.slice(0, 14)}…</span></div>
-          <div class="group-meta">${group.files.length} copies · ${formatBytes(reclaimable)} reclaimable</div>
+          <div class="group-meta">${group.files.length} copies · ${formatBytes(reclaimable)} reclaimable · keep: ${escapeHtml(group.originalReason || 'smart match')}</div>
         </div>
       `;
-      group.files.forEach((record, fileIndex) => card.appendChild(createFileRow(record, fileIndex === 0)));
+      group.files.forEach((record, fileIndex) => card.appendChild(createFileRow(record, fileIndex === 0, group.originalReason)));
       groupsList.appendChild(card);
     });
   }
