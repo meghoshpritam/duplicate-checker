@@ -359,14 +359,14 @@ async function readDirectory(handle, parentPath, records, progress) {
         }
       } catch (error) {
         progress.skipped += 1;
-        progress.skippedExamples.push(path);
+        progress.skippedExamples.push(`${path}: ${error.message || error}`);
       }
     }
   } catch (error) {
     // USB drives often contain folders that disappear or deny access while the
     // drive is being read. Skip that branch and let the rest of the scan finish.
     progress.skippedDirectories += 1;
-    progress.skippedExamples.push(parentPath || handle.name || 'selected folder');
+    progress.skippedExamples.push(`${parentPath || handle.name || 'selected folder'}: ${error.message || error}`);
   }
 }
 
@@ -421,6 +421,8 @@ async function hashPotentialDuplicates(records, progress) {
   if (!candidates.length) return;
 
   const byQuickFingerprint = new Map();
+  const quickFailedSizes = new Set();
+  const quickErrors = new Map();
   for (const record of candidates) {
     try {
       if (!record.quickHash) {
@@ -432,12 +434,17 @@ async function hashPotentialDuplicates(records, progress) {
       if (!byQuickFingerprint.has(key)) byQuickFingerprint.set(key, []);
       byQuickFingerprint.get(key).push(record);
     } catch (error) {
-      progress.skipped += 1;
-      progress.skippedExamples.push(record.path);
+      quickFailedSizes.add(record.size);
+      quickErrors.set(record.id, error);
     }
   }
 
-  const fullCandidates = Array.from(byQuickFingerprint.values()).filter((bucket) => bucket.length > 1).flat();
+  const fullCandidateMap = new Map();
+  Array.from(byQuickFingerprint.values()).filter((bucket) => bucket.length > 1).flat().forEach((record) => fullCandidateMap.set(record.id, record));
+  if (quickFailedSizes.size) {
+    candidates.filter((record) => quickFailedSizes.has(record.size)).forEach((record) => fullCandidateMap.set(record.id, record));
+  }
+  const fullCandidates = Array.from(fullCandidateMap.values());
   const newFullCandidates = fullCandidates.filter((record) => !record.hash);
   progress.fullHashCandidates = newFullCandidates.length;
   progress.hashCandidates = newFullCandidates.length;
@@ -460,7 +467,8 @@ async function hashPotentialDuplicates(records, progress) {
       publishPartialResults(records, progress);
     } catch (error) {
       progress.skipped += 1;
-      progress.skippedExamples.push(record.path);
+      const quickError = quickErrors.get(record.id);
+      progress.skippedExamples.push(`${record.path}: ${quickError ? `quick fingerprint failed: ${quickError.message || quickError}; ` : ''}full hash failed: ${error.message || error}`);
     }
   }
 }

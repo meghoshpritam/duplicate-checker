@@ -49,3 +49,5 @@ Every scan ends with a persistent report showing the outcome, files found, candi
 The app also keeps a local IndexedDB hash index keyed by the selected root, relative file path, file size, and last-modified timestamp. On later scans, unchanged files reuse their stored hash and are marked `cached` in the results; changed or new files are checked again. Duplicate groups appear while the scan is still running, then switch to final results when complete.
 
 Known OS metadata such as macOS `._*` AppleDouble files, `.DS_Store`, `Thumbs.db`, and `desktop.ini` is ignored and reported separately instead of being treated as scan errors.
+
+If a short quick-fingerprint read fails because a USB file changes or does not support a partial read, the scanner falls back to a full hash for that file's size group. Only files that fail both reads remain in the real skipped-items count, with the underlying OS error shown in the report.

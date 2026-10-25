@@ -209,10 +209,13 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 	quickResults := parallelHash(quickIndices, workerCount(), func(index int) (string, error) {
 		return quickFingerprint(records[index].AbsPath, records[index].Size)
 	})
+	quickFailedSizes := make(map[int64]bool)
+	quickErrors := make(map[int]error)
 	quickDone := 0
 	for result := range quickResults {
 		if result.Err != nil {
-			warnings = append(warnings, warning{records[result.Index].RelPath, result.Err.Error()})
+			quickFailedSizes[records[result.Index].Size] = true
+			quickErrors[result.Index] = result.Err
 			continue
 		}
 		records[result.Index].Quick = result.Value
@@ -229,16 +232,36 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	fullIndices := make([]int, 0)
+	fullIndexSet := make(map[int]bool)
 	for _, indices := range quickGroups {
 		if len(indices) > 1 {
 			for _, index := range indices {
 				if records[index].Hash == "" {
-					fullIndices = append(fullIndices, index)
+					fullIndexSet[index] = true
 				}
 			}
 		}
 	}
+	// If a quick read fails for one file in a size group, full-hash the whole
+	// group. This preserves exact duplicate detection instead of dropping that
+	// group from the scan just because a short sample read was unavailable.
+	for size := range quickFailedSizes {
+		for _, indices := range sameSize {
+			if len(indices) == 0 || records[indices[0]].Size != size {
+				continue
+			}
+			for _, index := range indices {
+				if records[index].Hash == "" {
+					fullIndexSet[index] = true
+				}
+			}
+		}
+	}
+	fullIndices := make([]int, 0, len(fullIndexSet))
+	for index := range fullIndexSet {
+		fullIndices = append(fullIndices, index)
+	}
+	sort.Ints(fullIndices)
 	fullResults := parallelHash(fullIndices, workerCount(), func(index int) (string, error) {
 		return fullHash(records[index].AbsPath)
 	})
@@ -256,7 +279,11 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 	fullDone := 0
 	for result := range fullResults {
 		if result.Err != nil {
-			warnings = append(warnings, warning{records[result.Index].RelPath, result.Err.Error()})
+			message := "full hash failed: " + result.Err.Error()
+			if quickErr, ok := quickErrors[result.Index]; ok {
+				message = fmt.Sprintf("quick fingerprint failed: %v; full hash failed: %v", quickErr, result.Err)
+			}
+			warnings = append(warnings, warning{records[result.Index].RelPath, message})
 			continue
 		}
 		record := &records[result.Index]
@@ -396,21 +423,36 @@ func quickFingerprint(path string, size int64) (string, error) {
 	}
 	defer file.Close()
 	hasher := sha256.New()
-	if size <= quickSample*2 {
-		if _, err := io.CopyN(hasher, file, size); err != nil && !errors.Is(err, io.EOF) {
-			return "", err
+	actualInfo, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	actualSize := actualInfo.Size()
+	if actualSize <= quickSample*2 {
+		data := make([]byte, actualSize)
+		read, readErr := file.ReadAt(data, 0)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return "", readErr
+		}
+		if read > 0 {
+			_, _ = hasher.Write(data[:read])
 		}
 	} else {
 		first := make([]byte, quickSample)
 		last := make([]byte, quickSample)
-		if _, err := io.ReadFull(file, first); err != nil {
-			return "", err
+		firstRead, firstErr := file.ReadAt(first, 0)
+		lastRead, lastErr := file.ReadAt(last, actualSize-quickSample)
+		if firstErr != nil && !errors.Is(firstErr, io.EOF) {
+			return "", firstErr
 		}
-		if _, err := file.ReadAt(last, size-quickSample); err != nil {
-			return "", err
+		if lastErr != nil && !errors.Is(lastErr, io.EOF) {
+			return "", lastErr
 		}
-		_, _ = hasher.Write(first)
-		_, _ = hasher.Write(last)
+		if firstRead == 0 || lastRead == 0 {
+			return "", io.ErrUnexpectedEOF
+		}
+		_, _ = hasher.Write(first[:firstRead])
+		_, _ = hasher.Write(last[:lastRead])
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
