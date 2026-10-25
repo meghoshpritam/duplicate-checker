@@ -14,6 +14,14 @@ Then open http://localhost:4173.
 
 ## Run everything
 
+Set up the local app once:
+
+```sh
+make setup
+```
+
+This verifies Python and Go, creates the repo-local cache/build directory, runs the native scanner tests, and builds the native helper.
+
 Start both the frontend and native scanner with one command:
 
 ```sh
