@@ -96,6 +96,7 @@ var allowedDeletes = struct {
 
 func main() {
 	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/cache", cacheHandler)
 	http.HandleFunc("/pick", pickHandler)
 	http.HandleFunc("/scan", scanHandler)
 	http.HandleFunc("/delete", deleteHandler)
@@ -125,6 +126,21 @@ func withCORS(next http.Handler) http.Handler {
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "workers": workerCount()})
+}
+
+func cacheHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	path := cacheLocation()
+	err := os.Remove(path)
+	removed := err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not clear native hash cache: " + err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
 }
 
 func pickHandler(w http.ResponseWriter, r *http.Request) {

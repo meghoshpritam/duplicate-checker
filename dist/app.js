@@ -29,6 +29,8 @@ const reportPanel = $('reportPanel');
 const groupsList = $('groupsList');
 const emptyState = $('emptyState');
 const nativeStatus = $('nativeStatus');
+const cacheStatus = $('cacheStatus');
+const clearCacheButton = $('clearCacheButton');
 const filtersBar = $('filtersBar');
 const typeFilter = $('typeFilter');
 const locationFilter = $('locationFilter');
@@ -99,6 +101,55 @@ async function flushHashCacheWrites() {
     transaction.oncomplete = resolve;
     transaction.onerror = () => reject(transaction.error);
   });
+}
+
+async function clearBrowserHashCache() {
+  pendingCacheWrites = [];
+  if (!('indexedDB' in window)) return false;
+  const db = hashCacheDbPromise ? await hashCacheDbPromise.catch(() => null) : null;
+  db?.close();
+  hashCacheDbPromise = null;
+  return new Promise((resolve, reject) => {
+    const request = window.indexedDB.deleteDatabase(HASH_CACHE_DB);
+    request.onsuccess = () => resolve(true);
+    request.onerror = () => reject(request.error || new Error('browser hash cache could not be deleted'));
+    request.onblocked = () => reject(new Error('browser hash cache is busy; finish the scan and try again'));
+  });
+}
+
+async function clearHashCache() {
+  if (state.scanning) return;
+  const confirmed = window.confirm('Clear saved hash history? The next scan will recheck files instead of reusing cached hashes. Your files will not be changed.');
+  if (!confirmed) return;
+  clearCacheButton.disabled = true;
+  const cleared = [];
+  const problems = [];
+  try {
+    if (await clearBrowserHashCache()) cleared.push('browser');
+  } catch (error) {
+    problems.push(`browser cache: ${error.message || 'could not clear'}`);
+  }
+  if (nativeAvailable) {
+    try {
+      const response = await fetch(`${NATIVE_SCANNER_URL}/cache`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const result = await response.json();
+      if (result.removed) cleared.push('native');
+    } catch (error) {
+      problems.push(`native cache: ${error.message || 'could not clear'}`);
+    }
+  }
+  clearCacheButton.disabled = state.scanning;
+  if (problems.length) {
+    cacheStatus.textContent = `Cache cleanup incomplete: ${problems.join('; ')}`;
+    setToast(problems.join(' · '), true);
+    return;
+  }
+  cacheStatus.textContent = cleared.length ? 'Hash history cleared. The next scan will perform fresh checks.' : 'No saved hash history was found.';
+  setToast(cleared.length ? 'Hash cache cleared. The next scan will recheck files.' : 'No hash cache was found.');
 }
 
 function rootCacheId() {
@@ -762,6 +813,7 @@ function updateStats() {
   $('groupCount').textContent = hasActiveFilters() ? `${visibleGroups.length}/${state.groups.length}` : state.groups.length;
   $('filterSummary').textContent = state.groups.length ? `${visibleGroups.length} of ${state.groups.length} groups` : '';
   deleteButton.disabled = getSelectedRecords().length === 0 || state.scanning;
+  clearCacheButton.disabled = state.scanning;
   renderSelectionSummary();
 }
 
@@ -1323,12 +1375,14 @@ async function checkNativeScanner() {
     nativeAvailable = true;
     nativeStatus.textContent = `Native helper connected · ${info.workers || 1} workers`;
     nativeStatus.className = 'native-status connected';
+    cacheStatus.textContent = 'Browser and native hash history are available. Clear them to force a fresh check.';
     chooseButton.innerHTML = 'Choose folder / drive <span>↗</span>';
     if (!state.source) helperText.textContent = 'Native backend active. Choose a folder or whole drive; the Go backend will scan the selection.';
   } catch (error) {
     nativeAvailable = false;
     nativeStatus.textContent = 'Native helper not connected · start it from README';
     nativeStatus.className = 'native-status';
+    cacheStatus.textContent = 'Browser hash history is available. Start the native helper to clear its repo cache too.';
     chooseButton.innerHTML = 'Choose folder <span>↗</span>';
   }
 }
@@ -1352,6 +1406,7 @@ clearFilters.addEventListener('click', () => {
   cacheFilter.value = 'all';
   renderGroups();
 });
+clearCacheButton.addEventListener('click', clearHashCache);
 selectAllButton.addEventListener('click', () => {
   const visibleDuplicates = getVisibleDuplicateRecords();
   if (!visibleDuplicates.length) return;

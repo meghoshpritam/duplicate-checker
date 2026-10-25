@@ -50,7 +50,7 @@ Every scan ends with a persistent report showing the outcome, files found, candi
 
 The scan summary also shows the readable size of the selected folder and the free space on its drive when using the native Go scanner. Browser-only mode can calculate folder size, but browsers do not expose the selected drive's free-space information, so that value is shown as unavailable there.
 
-The app also keeps a local IndexedDB hash index keyed by the selected root, relative file path, file size, and last-modified timestamp. On later scans, unchanged files reuse their stored hash and are marked `cached` in the results; changed or new files are checked again. Duplicate groups appear while the scan is still running, then switch to final results when complete.
+The app also keeps a local IndexedDB hash index keyed by the selected root, relative file path, file size, and last-modified timestamp. On later scans, unchanged files reuse their stored hash and are marked `cached` in the results; changed or new files are checked again. Use **Clear hash cache** in the scan panel to remove the browser IndexedDB history and, when the native helper is connected, the repo-backed `.duplicate-check-cache/hash-cache.jsonl` history too. This does not delete files; it only makes the next scan hash them afresh. Duplicate groups appear while the scan is still running, then switch to final results when complete.
 
 During large scans, the live results area intentionally shows a bounded preview and updates in batches so the browser stays responsive. The complete duplicate list is rendered when the scan finishes.
 
