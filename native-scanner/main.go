@@ -68,6 +68,10 @@ type event struct {
 	Skipped         int    `json:"skipped,omitempty"`
 	Ignored         int    `json:"ignored,omitempty"`
 	DurationMs      int64  `json:"durationMs,omitempty"`
+	FolderBytes     int64  `json:"folderBytes,omitempty"`
+	DiskTotalBytes  int64  `json:"diskTotalBytes,omitempty"`
+	DiskFreeBytes   int64  `json:"diskFreeBytes,omitempty"`
+	StorageError    string `json:"storageError,omitempty"`
 	Phase           string `json:"phase,omitempty"`
 	Current         int    `json:"current,omitempty"`
 	Total           int    `json:"total,omitempty"`
@@ -211,6 +215,16 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 
 	records, warnings, ignored := collectFiles(root)
 	initialWarningCount := len(warnings)
+	folderBytes := int64(0)
+	for _, record := range records {
+		folderBytes += record.Size
+	}
+	diskTotalBytes, diskFreeBytes, storageErr := diskSpace(root)
+	storageEvent := event{Type: "storage", FolderBytes: folderBytes, DiskTotalBytes: diskTotalBytes, DiskFreeBytes: diskFreeBytes}
+	if storageErr != nil {
+		storageEvent.StorageError = storageErr.Error()
+	}
+	_ = send(storageEvent)
 	for _, warning := range warnings {
 		_ = send(event{Type: "warning", Path: warning.path, Message: warning.message})
 	}
@@ -265,7 +279,9 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		records[result.Index].Quick = result.Value
 		quickDone++
-		_ = send(event{Type: "progress", Phase: "quick", Current: quickDone, Total: len(quickIndices)})
+		if quickDone%50 == 0 || quickDone == len(quickIndices) {
+			_ = send(event{Type: "progress", Phase: "quick", Current: quickDone, Total: len(quickIndices)})
+		}
 	}
 
 	quickGroups := make(map[string][]int)
@@ -336,7 +352,9 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 		s.Changed[record.RelPath] = cacheEntry{Root: root, Path: record.RelPath, Size: record.Size, Modified: record.Modified, Hash: record.Hash, Quick: record.Quick, SavedAt: time.Now().UnixMilli()}
 		fullDone++
 		_ = send(event{Type: "file", Path: record.RelPath, AbsolutePath: record.AbsPath, Size: record.Size, Modified: record.Modified, Hash: record.Hash})
-		_ = send(event{Type: "progress", Phase: "full", Current: fullDone, Total: len(fullIndices)})
+		if fullDone%10 == 0 || fullDone == len(fullIndices) {
+			_ = send(event{Type: "progress", Phase: "full", Current: fullDone, Total: len(fullIndices)})
+		}
 	}
 
 	for _, warning := range warnings[initialWarningCount:] {
@@ -352,7 +370,14 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 		allowedDeletes.paths[records[index].AbsPath] = true
 	}
 	allowedDeletes.Unlock()
-	_ = send(event{Type: "done", Root: root, FilesFound: len(records), ReusedHashes: reused, QuickCandidates: len(quickIndices), FullCandidates: len(fullIndices), FullHashes: len(s.Changed), Skipped: len(warnings), Ignored: ignored, DurationMs: time.Since(started).Milliseconds()})
+	_ = send(event{Type: "done", Root: root, FilesFound: len(records), ReusedHashes: reused, QuickCandidates: len(quickIndices), FullCandidates: len(fullIndices), FullHashes: len(s.Changed), Skipped: len(warnings), Ignored: ignored, DurationMs: time.Since(started).Milliseconds(), FolderBytes: folderBytes, DiskTotalBytes: diskTotalBytes, DiskFreeBytes: diskFreeBytes, StorageError: storageErrorText(storageErr)})
+}
+
+func storageErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func deleteHandler(w http.ResponseWriter, r *http.Request) {

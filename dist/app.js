@@ -8,6 +8,7 @@ const state = {
   viewMode: 'list',
   sortBy: 'name',
   sortDirection: 'asc',
+  storage: { folderBytes: null, diskTotalBytes: null, diskFreeBytes: null, error: '' },
   toastTimer: null,
   totalFilesFound: null,
   nativeRoot: '',
@@ -105,6 +106,18 @@ function formatBytes(bytes) {
 function formatDate(timestamp) {
   if (!timestamp) return '—';
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(timestamp));
+}
+
+function resetStorageStats() {
+  state.storage = { folderBytes: null, diskTotalBytes: null, diskFreeBytes: null, error: '' };
+}
+
+function storageDetail() {
+  const folder = state.storage.folderBytes == null ? 'folder size unavailable' : `${formatBytes(state.storage.folderBytes)} of readable files`;
+  const free = state.storage.diskFreeBytes == null
+    ? state.storage.error ? `free space unavailable (${state.storage.error})` : 'free space unavailable in browser mode'
+    : `${formatBytes(state.storage.diskFreeBytes)} free${state.storage.diskTotalBytes == null ? '' : ` of ${formatBytes(state.storage.diskTotalBytes)}`} on the selected drive`;
+  return `Readable folder size: ${folder}. ${free}.`;
 }
 
 function setToast(message, isError = false) {
@@ -225,6 +238,7 @@ async function chooseWithNativePicker() {
   state.folderHandle = null;
   state.inputFiles = [];
   state.source = 'native';
+  resetStorageStats();
   state.nativeRoot = result.path;
   setFolderLabel(result.path, 'native');
   setToast('Native folder ready. Start the scan when you’re ready.');
@@ -246,6 +260,7 @@ chooseButton.addEventListener('click', async () => {
       state.folderHandle = handle;
       state.nativeRoot = '';
       state.source = 'picker';
+      resetStorageStats();
       setFolderLabel(handle.name, 'picker');
       setToast('Folder ready. Start a scan when you’re ready.');
     } catch (error) {
@@ -263,6 +278,7 @@ folderInput.addEventListener('change', (event) => {
   state.folderHandle = null;
   state.nativeRoot = '';
   state.inputFiles = files;
+  resetStorageStats();
   const root = files[0].webkitRelativePath?.split('/')[0] || 'Selected folder';
   setFolderLabel(root, 'input');
 });
@@ -352,6 +368,7 @@ function pauseForUsb() {
 
 const QUICK_SAMPLE_BYTES = 64 * 1024;
 const FAST_HASH_LIMIT = 64 * 1024 * 1024;
+const LIVE_GROUP_LIMIT = 80;
 
 function bytesToHex(bytes) {
   return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -583,7 +600,16 @@ function updateStats() {
   const duplicateRecords = visibleGroups.flatMap((group) => group.files.slice(1));
   const selectedBytes = duplicateRecords.filter((record) => state.selected.has(record.id)).reduce((total, record) => total + record.size, 0);
   const filesFound = state.totalFilesFound ?? state.records.length;
+  const folderBytes = state.storage.folderBytes ?? (state.source && state.source !== 'native' ? state.records.reduce((total, record) => total + record.size, 0) : null);
   $('filesStat').textContent = filesFound ? filesFound.toLocaleString() : '—';
+  $('folderSizeStat').textContent = folderBytes == null ? (state.scanning && state.source === 'native' ? '…' : '—') : formatBytes(folderBytes);
+  $('folderSizeFoot').textContent = folderBytes == null ? 'after scan' : 'readable files';
+  $('freeSpaceStat').textContent = state.storage.diskFreeBytes == null
+    ? (state.storage.error ? 'N/A' : state.source === 'input' || state.source === 'picker' ? 'N/A' : '—')
+    : formatBytes(state.storage.diskFreeBytes);
+  $('freeSpaceFoot').textContent = state.storage.diskFreeBytes == null
+    ? (state.storage.error ? 'storage info unavailable' : state.source ? 'browser mode' : 'selected drive')
+    : state.storage.diskTotalBytes == null ? 'available on selected drive' : `available of ${formatBytes(state.storage.diskTotalBytes)}`;
   $('duplicatesStat').textContent = state.groups.length ? duplicateRecords.length.toLocaleString() : '—';
   $('duplicateFoot').textContent = state.groups.length ? `${visibleGroups.length}${hasActiveFilters() ? ` of ${state.groups.length}` : ''} matching group${visibleGroups.length === 1 ? '' : 's'}` : 'waiting for scan';
   $('spaceStat').textContent = state.groups.length ? formatBytes(selectedBytes) : '—';
@@ -593,11 +619,11 @@ function updateStats() {
 }
 
 function publishPartialResults(records, progress, force = false) {
+  const now = performance.now();
+  if (!force && now - progress.lastPublishAt < 250) return;
   const nextGroups = makeGroups(records);
   const signature = nextGroups.map((group) => `${group.hash}:${group.files.length}`).join('|');
-  const now = performance.now();
   if (!force && signature === progress.lastGroupSignature) return;
-  if (!force && now - progress.lastPublishAt < 250) return;
   state.records = records;
   state.groups = nextGroups;
   state.selected.clear();
@@ -663,7 +689,7 @@ function compareTreeRecords(first, second) {
   return state.sortDirection === 'desc' ? -result : result;
 }
 
-function renderTreeView(visibleGroups) {
+function renderTreeView(visibleGroups, totalGroups = visibleGroups.length) {
   const root = { name: 'Selected location', children: new Map(), files: [] };
   visibleGroups.forEach((group, groupIndex) => {
     group.files.forEach((record, fileIndex) => {
@@ -682,7 +708,7 @@ function renderTreeView(visibleGroups) {
     if (isRoot) {
       const rootLabel = document.createElement('div');
       rootLabel.className = 'tree-root-label';
-      rootLabel.innerHTML = `<span class="tree-folder-icon">⌂</span><strong>${escapeHtml(node.name)}</strong><span class="tree-count">${visibleGroups.length} duplicate groups</span>`;
+      rootLabel.innerHTML = `<span class="tree-folder-icon">⌂</span><strong>${escapeHtml(node.name)}</strong><span class="tree-count">${visibleGroups.length}${totalGroups > visibleGroups.length ? ` of ${totalGroups}` : ''} duplicate groups</span>`;
       container.appendChild(rootLabel);
     }
     Array.from(node.children.values()).sort((a, b) => a.name.localeCompare(b.name)).forEach((child) => {
@@ -728,10 +754,17 @@ function renderGroups() {
   }
   emptyState.hidden = true;
   groupsList.hidden = false;
+  const renderedGroups = state.scanning ? visibleGroups.slice(0, LIVE_GROUP_LIMIT) : visibleGroups;
+  if (renderedGroups.length < visibleGroups.length) {
+    const note = document.createElement('div');
+    note.className = 'live-preview-note';
+    note.textContent = `Live preview: showing ${renderedGroups.length} of ${visibleGroups.length} groups. The complete result will appear when the scan finishes.`;
+    groupsList.appendChild(note);
+  }
   if (state.viewMode === 'tree') {
-    renderTreeView(visibleGroups);
+    renderTreeView(renderedGroups, visibleGroups.length);
   } else {
-    visibleGroups.forEach((group, groupIndex) => {
+    renderedGroups.forEach((group, groupIndex) => {
       const duplicateFiles = group.files.slice(1);
       const reclaimable = duplicateFiles.reduce((sum, file) => sum + file.size, 0);
       const card = document.createElement('article');
@@ -776,6 +809,7 @@ async function runScan() {
     }
     if (state.source === 'picker' && state.folderHandle) await readDirectory(state.folderHandle, '', records, progress);
     if (state.source === 'input') await readInputFiles(state.inputFiles, records, progress);
+    state.storage.folderBytes = records.reduce((total, record) => total + record.size, 0);
     state.records = records;
     publishPartialResults(records, progress, true);
     setProgress(`Found ${records.length.toLocaleString()} files. Checking possible duplicates…`, 45);
@@ -804,7 +838,7 @@ async function runScan() {
       renderReport({
         status: 'warning',
         title: 'Scan completed with warnings',
-        detail: `The readable portion of the location was checked. ${filterSummary} Some files or folder branches could not be opened, so duplicate results may be partial. No files were changed during the scan.`,
+        detail: `The readable portion of the location was checked. ${storageDetail()} ${filterSummary} Some files or folder branches could not be opened, so duplicate results may be partial. No files were changed during the scan.`,
         filesFound: records.length,
         reusedHashes: progress.reusedHashes,
         hashedCandidates: progress.hashedCandidates,
@@ -818,7 +852,7 @@ async function runScan() {
       renderReport({
         status: 'complete',
         title: 'Scan completed successfully',
-        detail: `All readable files were checked for exact content matches. ${filterSummary} No files were changed during the scan.`,
+        detail: `All readable files were checked for exact content matches. ${storageDetail()} ${filterSummary} No files were changed during the scan.`,
         filesFound: records.length,
         reusedHashes: progress.reusedHashes,
         hashedCandidates: progress.hashedCandidates,
@@ -890,6 +924,7 @@ async function runNativeScan() {
   if (state.scanning) return;
   state.source = 'native';
   state.folderHandle = null;
+  resetStorageStats();
   state.totalFilesFound = null;
   state.scanning = true;
   state.records = [];
@@ -913,7 +948,7 @@ async function runNativeScan() {
   setProgress('Connecting to native scanner…', 3);
 
   const records = [];
-  const progress = { lastPublishAt: 0, lastGroupSignature: '', skipped: 0, ignored: 0, skippedExamples: [], reusedHashes: 0, quickCandidates: 0, fullHashCandidates: 0, hashedCandidates: 0 };
+  const progress = { lastPublishAt: 0, lastGroupSignature: '', lastProgressPaintAt: 0, skipped: 0, ignored: 0, skippedExamples: [], reusedHashes: 0, quickCandidates: 0, fullHashCandidates: 0, hashedCandidates: 0 };
   let doneEvent = null;
   try {
     const response = await fetch(`${NATIVE_SCANNER_URL}/scan`, {
@@ -945,7 +980,17 @@ async function runNativeScan() {
         const phaseLabel = event.phase === 'quick' ? 'Quick-checking' : 'Full-hashing';
         const base = event.phase === 'quick' ? 8 : 52;
         const range = event.phase === 'quick' ? 40 : 43;
-        setProgress(`${phaseLabel} ${event.current || 0} of ${event.total || 0}…`, base + ((event.current || 0) / Math.max(event.total || 1, 1)) * range);
+        const now = performance.now();
+        if (now - progress.lastProgressPaintAt >= 100 || event.current === event.total) {
+          setProgress(`${phaseLabel} ${event.current || 0} of ${event.total || 0}…`, base + ((event.current || 0) / Math.max(event.total || 1, 1)) * range);
+          progress.lastProgressPaintAt = now;
+        }
+      } else if (event.type === 'storage') {
+        state.storage.folderBytes = event.folderBytes ?? null;
+        state.storage.diskTotalBytes = event.diskTotalBytes ?? null;
+        state.storage.diskFreeBytes = event.diskFreeBytes ?? null;
+        state.storage.error = event.storageError || '';
+        updateStats();
       } else if (event.type === 'warning') {
         progress.skipped += 1;
         progress.skippedExamples.push(event.path ? `${event.path}: ${event.message}` : event.message);
@@ -953,15 +998,20 @@ async function runNativeScan() {
         doneEvent = event;
       }
     };
+    const processEventLines = async (lines) => {
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
+        if (!line.trim()) continue;
+        try { handleEvent(JSON.parse(line)); } catch (parseError) { progress.skipped += 1; progress.skippedExamples.push(`Invalid native scanner event: ${parseError.message}`); }
+        if (index > 0 && index % 100 === 0) await pauseForUsb();
+      }
+    };
     while (true) {
       const { value, done } = await reader.read();
       buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
-      lines.forEach((line) => {
-        if (!line.trim()) return;
-        try { handleEvent(JSON.parse(line)); } catch (parseError) { progress.skipped += 1; progress.skippedExamples.push(`Invalid native scanner event: ${parseError.message}`); }
-      });
+      await processEventLines(lines);
       if (done) break;
     }
     if (buffer.trim()) handleEvent(JSON.parse(buffer));
@@ -971,6 +1021,10 @@ async function runNativeScan() {
     progress.fullHashCandidates = doneEvent.fullCandidates || 0;
     progress.hashedCandidates = doneEvent.fullHashes || 0;
     progress.ignored = doneEvent.ignored || 0;
+    state.storage.folderBytes = doneEvent.folderBytes ?? state.storage.folderBytes;
+    state.storage.diskTotalBytes = doneEvent.diskTotalBytes ?? state.storage.diskTotalBytes;
+    state.storage.diskFreeBytes = doneEvent.diskFreeBytes ?? state.storage.diskFreeBytes;
+    state.storage.error = doneEvent.storageError || state.storage.error;
     state.totalFilesFound = doneEvent.filesFound || 0;
     state.records = records;
     state.groups = makeGroups(records);
@@ -983,7 +1037,7 @@ async function runNativeScan() {
     renderReport({
       status: skipped ? 'warning' : 'complete',
       title: skipped ? 'Native scan completed with warnings' : 'Native scan completed successfully',
-      detail: `${progress.reusedHashes.toLocaleString()} unchanged hashes were reused. ${progress.quickCandidates.toLocaleString()} same-size files were quick-checked; ${progress.hashedCandidates.toLocaleString()} full hashes were performed.${progress.ignored ? ` ${progress.ignored.toLocaleString()} OS metadata files were ignored.` : ''} ${skipped ? 'Some items could not be read, so results may be partial.' : 'All readable files were checked.'} No files were changed during the scan.`,
+      detail: `${storageDetail()} ${progress.reusedHashes.toLocaleString()} unchanged hashes were reused. ${progress.quickCandidates.toLocaleString()} same-size files were quick-checked; ${progress.hashedCandidates.toLocaleString()} full hashes were performed.${progress.ignored ? ` ${progress.ignored.toLocaleString()} OS metadata files were ignored.` : ''} ${skipped ? 'Some items could not be read, so results may be partial.' : 'All readable files were checked.'} No files were changed during the scan.`,
       filesFound: state.totalFilesFound,
       reusedHashes: progress.reusedHashes,
       hashedCandidates: progress.hashedCandidates,
@@ -1132,6 +1186,7 @@ clearButton.addEventListener('click', () => {
   state.inputFiles = [];
   state.nativeRoot = '';
   state.totalFilesFound = null;
+  resetStorageStats();
   reportPanel.hidden = true;
   $('liveStatus').hidden = true;
   clearButton.hidden = true;

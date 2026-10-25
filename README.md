@@ -48,7 +48,11 @@ The scanner is designed for large removable drives: it first compares file sizes
 
 Every scan ends with a persistent report showing the outcome, files found, candidates hashed, skipped items, skipped folder branches, and representative read errors. Partial duplicate results remain visible when possible.
 
+The scan summary also shows the readable size of the selected folder and the free space on its drive when using the native Go scanner. Browser-only mode can calculate folder size, but browsers do not expose the selected drive's free-space information, so that value is shown as unavailable there.
+
 The app also keeps a local IndexedDB hash index keyed by the selected root, relative file path, file size, and last-modified timestamp. On later scans, unchanged files reuse their stored hash and are marked `cached` in the results; changed or new files are checked again. Duplicate groups appear while the scan is still running, then switch to final results when complete.
+
+During large scans, the live results area intentionally shows a bounded preview and updates in batches so the browser stays responsive. The complete duplicate list is rendered when the scan finishes.
 
 Results can be shown as a **List** or **Tree**. Tree view groups files by their folders while keeping the same open, select, delete, filtering, and sorting actions. Filters include file type, location/name, and whether a hash was reused from cache. Sort groups by name/location, reclaimable space, duplicate copies, largest file, last modified, or hash, in ascending or descending order. **Open** launches native files with the system app or opens browser-accessible files in a new tab.
 
