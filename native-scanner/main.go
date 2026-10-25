@@ -99,6 +99,7 @@ func main() {
 	http.HandleFunc("/pick", pickHandler)
 	http.HandleFunc("/scan", scanHandler)
 	http.HandleFunc("/delete", deleteHandler)
+	http.HandleFunc("/file", fileHandler)
 	http.HandleFunc("/open", openHandler)
 
 	fmt.Printf("Duplicate Checker native scanner listening on http://%s\n", port)
@@ -411,6 +412,37 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func fileHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid file path"})
+		return
+	}
+	allowedDeletes.RLock()
+	isAllowed := allowedDeletes.paths[path]
+	allowedDeletes.RUnlock()
+	if !isAllowed {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "file was not returned as a duplicate by the latest scan"})
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "file does not exist or is a folder"})
+		return
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+	defer file.Close()
+	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 }
 
 func openHandler(w http.ResponseWriter, r *http.Request) {

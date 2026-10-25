@@ -54,7 +54,7 @@ The app also keeps a local IndexedDB hash index keyed by the selected root, rela
 
 During large scans, the live results area intentionally shows a bounded preview and updates in batches so the browser stays responsive. The complete duplicate list is rendered when the scan finishes.
 
-Results can be shown as a **List** or **Tree**. Tree view groups files by their folders while keeping the same open, select, delete, filtering, and sorting actions. Filters include file type, location/name, and whether a hash was reused from cache. Sort groups by name/location, reclaimable space, duplicate copies, largest file, last modified, or hash, in ascending or descending order. **Open** launches native files with the system app or opens browser-accessible files in a new tab.
+Results can be shown as a **List** or **Tree**. Tree view groups files by their folders while keeping the same open, select, delete, filtering, and sorting actions. Choose **Set original** on any file in a duplicate group to change which copy is kept; the other copies become selected for deletion. Filters include file type, location/name, and whether a hash was reused from cache. Sort groups by name/location, reclaimable space, duplicate copies, largest file, last modified, or hash, in ascending or descending order. **Open** immediately opens the file in a new browser tab; native scans stream the duplicate through the local helper, while browser scans use a local object URL.
 
 Known OS metadata such as macOS `._*` AppleDouble files, `.DS_Store`, `Thumbs.db`, and `desktop.ini` is ignored and reported separately instead of being treated as scan errors.
 

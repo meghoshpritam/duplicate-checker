@@ -4,6 +4,7 @@ const state = {
   records: [],
   groups: [],
   selected: new Set(),
+  originals: new Map(),
   scanning: false,
   viewMode: 'list',
   sortBy: 'name',
@@ -588,11 +589,16 @@ function makeGroups(records) {
   });
   return Array.from(map.entries())
     .filter(([, files]) => files.length > 1)
-    .map(([hash, files], index) => ({
-      id: `group-${index}`,
-      hash,
-      files: files.sort((a, b) => a.path.localeCompare(b.path)),
-    }));
+    .map(([hash, files], index) => {
+      const sortedFiles = files.sort((a, b) => a.path.localeCompare(b.path));
+      const originalId = state.originals.get(hash);
+      const originalIndex = originalId ? sortedFiles.findIndex((record) => record.id === originalId) : -1;
+      if (originalIndex > 0) {
+        const [original] = sortedFiles.splice(originalIndex, 1);
+        sortedFiles.unshift(original);
+      }
+      return { id: `group-${index}`, hash, files: sortedFiles };
+    });
 }
 
 function updateStats() {
@@ -634,23 +640,23 @@ function publishPartialResults(records, progress, force = false) {
 }
 
 async function openRecord(record) {
+  let openedTab = null;
+  let objectUrl = '';
   try {
+    openedTab = window.open('about:blank', '_blank');
+    if (!openedTab) throw new Error('The browser blocked the new tab. Allow pop-ups for this app.');
     if (state.source === 'native') {
-      const response = await fetch(`${NATIVE_SCANNER_URL}/open`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: record.absolutePath }),
-      });
-      if (!response.ok) throw new Error(await response.text());
-      setToast(`Opened ${record.name} with the system app.`);
+      openedTab.location.href = `${NATIVE_SCANNER_URL}/file?path=${encodeURIComponent(record.absolutePath)}`;
+      setToast(`Opened ${record.name} in a new tab.`);
       return;
     }
     const file = record.file || await record.fileHandle.getFile();
-    const objectUrl = URL.createObjectURL(file);
-    const opened = window.open(objectUrl, '_blank', 'noopener,noreferrer');
-    if (!opened) throw new Error('The browser blocked the new tab. Allow pop-ups for this app.');
+    objectUrl = URL.createObjectURL(file);
+    openedTab.location.href = objectUrl;
     setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+    setToast(`Opened ${record.name} in a new tab.`);
   } catch (error) {
+    if (openedTab && !openedTab.closed) openedTab.close();
     setToast(`Could not open ${record.name}: ${error.message || 'file access failed'}`, true);
   }
 }
@@ -665,7 +671,7 @@ function createFileRow(record, isKeep) {
     <div class="file-main"><span class="file-icon">▧</span><div><div class="file-name" title="${escapeHtml(record.name)}">${escapeHtml(record.name)}</div><span class="file-path" title="${escapeHtml(record.path)}">${escapeHtml(record.path)}</span><span class="file-hash${cachedClass}" title="${record.hash || ''}">sha256 ${hashLabel}</span></div></div>
     <span class="file-size">${formatBytes(record.size)}</span>
     <span class="file-date">${formatDate(record.modified)}</span>
-    <div class="file-actions"><button class="open-one" type="button" ${state.scanning && state.source === 'native' ? 'disabled' : ''}>Open</button>${isKeep ? '<span class="keep-label">Keep original</span>' : `<button class="delete-one" type="button" ${state.scanning ? 'disabled' : ''}>Delete</button>`}</div>
+    <div class="file-actions"><button class="open-one" type="button" aria-label="Open ${escapeHtml(record.name)} in a new tab" ${state.scanning && state.source === 'native' ? 'disabled' : ''}>Open tab</button>${isKeep ? '<span class="keep-label">Keep original</span>' : `<button class="set-original" type="button" aria-label="Set ${escapeHtml(record.name)} as original" ${state.scanning ? 'disabled' : ''}>Set original</button><button class="delete-one" type="button" ${state.scanning ? 'disabled' : ''}>Delete</button>`}</div>
   `;
   row.querySelector('.open-one').addEventListener('click', () => openRecord(record));
   if (!isKeep) {
@@ -674,9 +680,21 @@ function createFileRow(record, isKeep) {
       if (checkbox.checked) state.selected.add(record.id); else state.selected.delete(record.id);
       updateStats();
     });
+    row.querySelector('.set-original').addEventListener('click', () => setOriginalForRecord(record));
     row.querySelector('.delete-one').addEventListener('click', () => deleteRecords([record]));
   }
   return row;
+}
+
+function setOriginalForRecord(record) {
+  const group = state.groups.find((candidate) => candidate.hash === record.hash);
+  if (!group || group.files[0]?.id === record.id) return;
+  state.originals.set(group.hash, record.id);
+  group.files = [record, ...group.files.filter((item) => item.id !== record.id)];
+  group.files.forEach((item) => state.selected.delete(item.id));
+  group.files.slice(1).forEach((item) => state.selected.add(item.id));
+  renderGroups();
+  setToast(`${record.name} is now the original. Other copies remain selected for deletion.`);
 }
 
 function compareTreeRecords(first, second) {
@@ -788,6 +806,7 @@ async function runScan() {
   state.records = [];
   state.groups = [];
   state.selected.clear();
+  state.originals.clear();
   state.totalFilesFound = null;
   clearButton.hidden = true;
   $('liveStatus').hidden = false;
@@ -930,6 +949,7 @@ async function runNativeScan() {
   state.records = [];
   state.groups = [];
   state.selected.clear();
+  state.originals.clear();
   state.nativeRecords = new Map();
   clearButton.hidden = true;
   locationText.textContent = requestedPath;
@@ -1183,6 +1203,7 @@ clearButton.addEventListener('click', () => {
   state.records = [];
   state.groups = [];
   state.selected.clear();
+  state.originals.clear();
   state.inputFiles = [];
   state.nativeRoot = '';
   state.totalFilesFound = null;
