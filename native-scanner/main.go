@@ -95,6 +95,7 @@ func main() {
 	http.HandleFunc("/pick", pickHandler)
 	http.HandleFunc("/scan", scanHandler)
 	http.HandleFunc("/delete", deleteHandler)
+	http.HandleFunc("/open", openHandler)
 
 	fmt.Printf("Duplicate Checker native scanner listening on http://%s\n", port)
 	fmt.Println("Use the browser UI's Native scanner section for large USB drives.")
@@ -381,6 +382,49 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := os.Remove(request.Path); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func openHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	var request struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Path == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid file path"})
+		return
+	}
+	allowedDeletes.RLock()
+	isAllowed := allowedDeletes.paths[request.Path]
+	allowedDeletes.RUnlock()
+	if !isAllowed {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "file was not returned as a duplicate by the latest scan"})
+		return
+	}
+	if info, err := os.Stat(request.Path); err != nil || info.IsDir() {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file does not exist or is a folder"})
+		return
+	}
+
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		command = exec.Command("open", request.Path)
+	case "windows":
+		command = exec.Command("cmd", "/c", "start", "", request.Path)
+	case "linux":
+		command = exec.Command("xdg-open", request.Path)
+	default:
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "open is not supported on this operating system"})
+		return
+	}
+	if err := command.Start(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

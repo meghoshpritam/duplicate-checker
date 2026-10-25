@@ -24,6 +24,11 @@ const reportPanel = $('reportPanel');
 const groupsList = $('groupsList');
 const emptyState = $('emptyState');
 const nativeStatus = $('nativeStatus');
+const filtersBar = $('filtersBar');
+const typeFilter = $('typeFilter');
+const locationFilter = $('locationFilter');
+const cacheFilter = $('cacheFilter');
+const clearFilters = $('clearFilters');
 const NATIVE_SCANNER_URL = 'http://127.0.0.1:4317';
 let nativeAvailable = false;
 
@@ -153,6 +158,34 @@ function escapeHtml(value) {
 function isSystemMetadataFile(name) {
   const lowerName = name.toLowerCase();
   return name.startsWith('._') || lowerName === '.ds_store' || lowerName === 'thumbs.db' || lowerName === 'desktop.ini';
+}
+
+function fileCategory(record) {
+  const extension = (record.name.match(/\.([^.]+)$/)?.[1] || '').toLowerCase();
+  const categories = {
+    images: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'tif', 'tiff', 'bmp', 'svg'],
+    videos: ['mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v', 'wmv', 'mpeg', 'mpg'],
+    audio: ['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg', 'wma', 'aiff'],
+    documents: ['pdf', 'doc', 'docx', 'txt', 'md', 'rtf', 'csv', 'xls', 'xlsx', 'ppt', 'pptx'],
+    archives: ['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'dmg', 'iso'],
+  };
+  return Object.entries(categories).find(([, extensions]) => extensions.includes(extension))?.[0] || 'other';
+}
+
+function hasActiveFilters() {
+  return typeFilter.value !== 'all' || locationFilter.value.trim() || cacheFilter.value !== 'all';
+}
+
+function getFilteredGroups() {
+  const type = typeFilter.value;
+  const location = locationFilter.value.trim().toLowerCase();
+  const cacheStatus = cacheFilter.value;
+  return state.groups.filter((group) => group.files.some((record) => {
+    const matchesType = type === 'all' || fileCategory(record) === type;
+    const matchesLocation = !location || `${record.path} ${record.name}`.toLowerCase().includes(location);
+    const matchesCache = cacheStatus === 'all' || (cacheStatus === 'cached' ? record.cached : !record.cached);
+    return matchesType && matchesLocation && matchesCache;
+  }));
 }
 
 async function chooseWithNativePicker() {
@@ -520,15 +553,17 @@ function makeGroups(records) {
 }
 
 function updateStats() {
-  const duplicateRecords = state.groups.flatMap((group) => group.files.slice(1));
+  const visibleGroups = getFilteredGroups();
+  const duplicateRecords = visibleGroups.flatMap((group) => group.files.slice(1));
   const selectedBytes = duplicateRecords.filter((record) => state.selected.has(record.id)).reduce((total, record) => total + record.size, 0);
   const filesFound = state.totalFilesFound ?? state.records.length;
   $('filesStat').textContent = filesFound ? filesFound.toLocaleString() : '—';
   $('duplicatesStat').textContent = state.groups.length ? duplicateRecords.length.toLocaleString() : '—';
-  $('duplicateFoot').textContent = state.groups.length ? `${state.groups.length} matching group${state.groups.length === 1 ? '' : 's'}` : 'waiting for scan';
+  $('duplicateFoot').textContent = state.groups.length ? `${visibleGroups.length}${hasActiveFilters() ? ` of ${state.groups.length}` : ''} matching group${visibleGroups.length === 1 ? '' : 's'}` : 'waiting for scan';
   $('spaceStat').textContent = state.groups.length ? formatBytes(selectedBytes) : '—';
-  $('groupCount').textContent = state.groups.length;
-  deleteButton.disabled = state.selected.size === 0 || state.scanning;
+  $('groupCount').textContent = hasActiveFilters() ? `${visibleGroups.length}/${state.groups.length}` : state.groups.length;
+  $('filterSummary').textContent = state.groups.length ? `${visibleGroups.length} of ${state.groups.length} groups` : '';
+  deleteButton.disabled = !duplicateRecords.some((record) => state.selected.has(record.id)) || state.scanning;
 }
 
 function publishPartialResults(records, progress, force = false) {
@@ -546,19 +581,43 @@ function publishPartialResults(records, progress, force = false) {
   renderGroups();
 }
 
+async function openRecord(record) {
+  try {
+    if (state.source === 'native') {
+      const response = await fetch(`${NATIVE_SCANNER_URL}/open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: record.absolutePath }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      setToast(`Opened ${record.name} with the system app.`);
+      return;
+    }
+    const file = record.file || await record.fileHandle.getFile();
+    const objectUrl = URL.createObjectURL(file);
+    const opened = window.open(objectUrl, '_blank', 'noopener,noreferrer');
+    if (!opened) throw new Error('The browser blocked the new tab. Allow pop-ups for this app.');
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  } catch (error) {
+    setToast(`Could not open ${record.name}: ${error.message || 'file access failed'}`, true);
+  }
+}
+
 function renderGroups() {
   groupsList.innerHTML = '';
-  if (!state.groups.length) {
+  const visibleGroups = getFilteredGroups();
+  filtersBar.hidden = state.groups.length === 0;
+  if (!state.groups.length || !visibleGroups.length) {
     groupsList.hidden = true;
     emptyState.hidden = false;
-    $('emptyTitle').textContent = state.scanning ? 'Scanning for duplicates…' : 'No duplicate groups yet';
-    $('emptyCopy').textContent = state.scanning ? 'Results will appear here as files finish their checks.' : 'Select a folder above and start a scan. Identical files will be grouped by content, not just filename.';
+    $('emptyTitle').textContent = !state.groups.length && state.scanning ? 'Scanning for duplicates…' : !state.groups.length ? 'No duplicate groups yet' : 'No groups match these filters';
+    $('emptyCopy').textContent = !state.groups.length && state.scanning ? 'Results will appear here as files finish their checks.' : !state.groups.length ? 'Select a folder above and start a scan. Identical files will be grouped by content, not just filename.' : 'Try clearing a filter or searching for another folder, filename, or file type.';
     updateStats();
     return;
   }
   emptyState.hidden = true;
   groupsList.hidden = false;
-  state.groups.forEach((group, groupIndex) => {
+  visibleGroups.forEach((group, groupIndex) => {
     const duplicateFiles = group.files.slice(1);
     const reclaimable = duplicateFiles.reduce((sum, file) => sum + file.size, 0);
     const card = document.createElement('article');
@@ -580,8 +639,9 @@ function renderGroups() {
         <div class="file-main"><span class="file-icon">▧</span><div><div class="file-name" title="${escapeHtml(record.name)}">${escapeHtml(record.name)}</div><span class="file-path" title="${escapeHtml(record.path)}">${escapeHtml(record.path)}</span><span class="file-hash${cachedClass}" title="${record.hash || ''}">sha256 ${hashLabel}</span></div></div>
         <span class="file-size">${formatBytes(record.size)}</span>
         <span class="file-date">${formatDate(record.modified)}</span>
-        ${isKeep ? '<span class="keep-label">Keep original</span>' : `<button class="delete-one" type="button" ${state.scanning ? 'disabled' : ''}>Delete</button>`}
+        <div class="file-actions"><button class="open-one" type="button" ${state.scanning && state.source === 'native' ? 'disabled' : ''}>Open</button>${isKeep ? '<span class="keep-label">Keep original</span>' : `<button class="delete-one" type="button" ${state.scanning ? 'disabled' : ''}>Delete</button>`}</div>
       `;
+      row.querySelector('.open-one').addEventListener('click', () => openRecord(record));
       if (!isKeep) {
         const checkbox = row.querySelector('.file-check');
         checkbox.addEventListener('change', () => {
@@ -942,8 +1002,17 @@ async function checkNativeScanner() {
   }
 }
 
+typeFilter.addEventListener('change', renderGroups);
+cacheFilter.addEventListener('change', renderGroups);
+locationFilter.addEventListener('input', renderGroups);
+clearFilters.addEventListener('click', () => {
+  typeFilter.value = 'all';
+  locationFilter.value = '';
+  cacheFilter.value = 'all';
+  renderGroups();
+});
 scanButton.addEventListener('click', () => state.source === 'native' ? runNativeScan() : runScan());
-deleteButton.addEventListener('click', () => deleteRecords(state.groups.flatMap((group) => group.files.filter((file) => state.selected.has(file.id)))));
+deleteButton.addEventListener('click', () => deleteRecords(getFilteredGroups().flatMap((group) => group.files.filter((file) => state.selected.has(file.id)))));
 clearButton.addEventListener('click', () => {
   state.records = [];
   state.groups = [];
