@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#07100d" />
+    <title>Duplicate // Checker</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark"><span></span><span></span><span></span></div>
+          <div><strong>duplicate</strong><em>// checker</em></div>
+        </div>
+
+        <div class="sidebar-copy">
+          <p class="eyebrow">LOCAL FILE UTILITY</p>
+          <h1>Less clutter.<br /><span>More room.</span></h1>
+          <p>Find exact duplicates without uploading a single byte.</p>
+        </div>
+
+        <div class="privacy-card">
+          <div class="privacy-icon">◉</div>
+          <div>
+            <strong>Private by default</strong>
+            <p>Files are hashed in your browser and never leave this device.</p>
+          </div>
+        </div>
+
+        <div class="sidebar-footer">
+          <span class="status-dot"></span>
+          <span>Ready to scan</span>
+          <span class="version">v1.0</span>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">WORKSPACE / DUPLICATE AUDIT</p>
+            <h2>Scan your files</h2>
+          </div>
+          <div class="topbar-badge"><span class="mini-dot"></span> On-device scan</div>
+        </header>
+
+        <section class="scan-panel">
+          <div class="scan-panel-head">
+            <div>
+              <span class="step-number">01</span>
+              <div>
+                <p class="eyebrow">CHOOSE A LOCATION</p>
+                <h3>Where should we look?</h3>
+              </div>
+            </div>
+            <span class="support-note">SHA-256 matching</span>
+          </div>
+
+          <div class="location-row">
+            <div class="location-display" id="locationDisplay">
+              <span class="folder-icon">⌂</span>
+              <span id="locationText">No folder selected</span>
+            </div>
+            <button class="button button-secondary" id="chooseButton" type="button">Choose folder <span>↗</span></button>
+            <input id="folderInput" type="file" webkitdirectory directory multiple hidden />
+          </div>
+          <p class="helper-text" id="helperText">Choose a folder to scan every file inside it, including nested folders.</p>
+
+          <div class="scan-actions">
+            <button class="button button-primary" id="scanButton" type="button" disabled>
+              <span class="button-icon">⌕</span> Start scan
+            </button>
+            <button class="text-button" id="clearButton" type="button" hidden>Clear results</button>
+          </div>
+        </section>
+
+        <section class="stats-grid" aria-label="Scan summary">
+          <div class="stat-card"><span class="stat-label">FILES SCANNED</span><strong id="filesStat">—</strong><span class="stat-foot">all file types</span></div>
+          <div class="stat-card accent"><span class="stat-label">DUPLICATE FILES</span><strong id="duplicatesStat">—</strong><span class="stat-foot" id="duplicateFoot">waiting for scan</span></div>
+          <div class="stat-card"><span class="stat-label">SPACE TO RECLAIM</span><strong id="spaceStat">—</strong><span class="stat-foot">from selected duplicates</span></div>
+        </section>
+
+        <section class="results-section" id="resultsSection">
+          <div class="results-header">
+            <div>
+              <p class="eyebrow">02 / REVIEW MATCHES</p>
+              <h3>Duplicate groups <span id="groupCount">0</span></h3>
+            </div>
+            <button class="button button-danger" id="deleteButton" type="button" disabled><span>×</span> Delete selected</button>
+          </div>
+
+          <div class="progress-wrap" id="progressWrap" hidden>
+            <div class="progress-label"><span id="progressText">Preparing scan…</span><span id="progressPercent">0%</span></div>
+            <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
+          </div>
+
+          <div class="empty-state" id="emptyState">
+            <div class="empty-illustration"><span></span><span></span><span></span><span></span></div>
+            <h4>No duplicate groups yet</h4>
+            <p>Select a folder above and start a scan. Identical files will be grouped by content, not just filename.</p>
+          </div>
+
+          <div class="groups-list" id="groupsList" hidden></div>
+        </section>
+
+        <footer class="workspace-footer">
+          <span>Files stay on your device</span>
+          <span class="footer-separator">/</span>
+          <span>Deletion requires folder permission</span>
+        </footer>
+      </main>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>
