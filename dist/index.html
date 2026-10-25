@@ -25,7 +25,7 @@
           <div class="privacy-icon">◉</div>
           <div>
             <strong>Private by default</strong>
-            <p>Files are hashed in your browser and never leave this device.</p>
+            <p>Files are hashed locally and never leave this device.</p>
           </div>
         </div>
 
@@ -89,6 +89,10 @@
               <h3>Duplicate groups <span id="groupCount">0</span></h3>
             </div>
             <div class="results-header-actions">
+              <div class="view-toggle" role="group" aria-label="Results view">
+                <button class="view-toggle-button active" id="listViewButton" type="button" aria-pressed="true">List</button>
+                <button class="view-toggle-button" id="treeViewButton" type="button" aria-pressed="false">Tree</button>
+              </div>
               <span class="live-status" id="liveStatus" hidden><i></i> Live results</span>
               <button class="button button-danger" id="deleteButton" type="button" disabled><span>×</span> Delete selected</button>
             </div>
@@ -98,6 +102,8 @@
             <label>TYPE<select id="typeFilter"><option value="all">All types</option><option value="images">Images</option><option value="videos">Videos</option><option value="audio">Audio</option><option value="documents">Documents</option><option value="archives">Archives</option><option value="other">Other</option></select></label>
             <label>LOCATION<input id="locationFilter" type="search" placeholder="Folder or filename" /></label>
             <label>HASH STATUS<select id="cacheFilter"><option value="all">All hashes</option><option value="cached">Cached</option><option value="new">New this scan</option></select></label>
+            <label>SORT BY<select id="sortFilter"><option value="name">Name / location</option><option value="reclaimable">Reclaimable space</option><option value="copies">Duplicate copies</option><option value="largest">Largest file</option><option value="modified">Last modified</option><option value="hash">Hash</option></select></label>
+            <button class="sort-direction" id="sortDirection" type="button" aria-label="Sort ascending">↑ Ascending</button>
             <button class="clear-filters" id="clearFilters" type="button">Clear filters</button>
             <span class="filter-summary" id="filterSummary"></span>
           </div>

@@ -5,6 +5,9 @@ const state = {
   groups: [],
   selected: new Set(),
   scanning: false,
+  viewMode: 'list',
+  sortBy: 'name',
+  sortDirection: 'asc',
   toastTimer: null,
   totalFilesFound: null,
   nativeRoot: '',
@@ -29,6 +32,10 @@ const typeFilter = $('typeFilter');
 const locationFilter = $('locationFilter');
 const cacheFilter = $('cacheFilter');
 const clearFilters = $('clearFilters');
+const sortFilter = $('sortFilter');
+const sortDirection = $('sortDirection');
+const listViewButton = $('listViewButton');
+const treeViewButton = $('treeViewButton');
 const NATIVE_SCANNER_URL = 'http://127.0.0.1:4317';
 let nativeAvailable = false;
 
@@ -147,8 +154,8 @@ function setFolderLabel(name, source) {
   helperText.textContent = source === 'native'
     ? 'Native scanner selected. Start scan to read this folder or drive with the Go backend.'
     : source === 'picker'
-      ? 'Browser folder access is enabled for this session. Use Fast USB Mode for large drives.'
-      : 'Folder selected. Browser fallback results are read-only; use Fast USB Mode for native deletion.';
+      ? 'Browser folder access is enabled for this session. Use the native helper for very large drives.'
+      : 'Folder selected. Browser fallback results are read-only; choose the folder through the native helper for deletion.';
 }
 
 function escapeHtml(value) {
@@ -176,6 +183,25 @@ function hasActiveFilters() {
   return typeFilter.value !== 'all' || locationFilter.value.trim() || cacheFilter.value !== 'all';
 }
 
+function groupSortValue(group) {
+  if (state.sortBy === 'reclaimable') return group.files.slice(1).reduce((total, record) => total + record.size, 0);
+  if (state.sortBy === 'copies') return group.files.length;
+  if (state.sortBy === 'largest') return Math.max(...group.files.map((record) => record.size));
+  if (state.sortBy === 'modified') return Math.max(...group.files.map((record) => record.modified || 0));
+  if (state.sortBy === 'hash') return group.hash;
+  return group.files[0]?.path.toLowerCase() || '';
+}
+
+function compareGroups(first, second) {
+  const firstValue = groupSortValue(first);
+  const secondValue = groupSortValue(second);
+  let result = typeof firstValue === 'number' && typeof secondValue === 'number'
+    ? firstValue - secondValue
+    : String(firstValue).localeCompare(String(secondValue), undefined, { numeric: true, sensitivity: 'base' });
+  if (!result) result = first.hash.localeCompare(second.hash);
+  return state.sortDirection === 'desc' ? -result : result;
+}
+
 function getFilteredGroups() {
   const type = typeFilter.value;
   const location = locationFilter.value.trim().toLowerCase();
@@ -185,7 +211,7 @@ function getFilteredGroups() {
     const matchesLocation = !location || `${record.path} ${record.name}`.toLowerCase().includes(location);
     const matchesCache = cacheStatus === 'all' || (cacheStatus === 'cached' ? record.cached : !record.cached);
     return matchesType && matchesLocation && matchesCache;
-  }));
+  })).sort(compareGroups);
 }
 
 async function chooseWithNativePicker() {
@@ -603,8 +629,93 @@ async function openRecord(record) {
   }
 }
 
+function createFileRow(record, isKeep) {
+  const row = document.createElement('div');
+  row.className = `file-row${isKeep ? ' is-keep' : ''}`;
+  const hashLabel = record.hash ? `${record.hash.slice(0, 18)}…` : 'hash pending';
+  const cachedClass = record.cached ? ' cached' : '';
+  row.innerHTML = `
+    <input class="file-check" type="checkbox" ${isKeep || state.scanning ? 'disabled' : ''} ${state.selected.has(record.id) ? 'checked' : ''} aria-label="Select ${escapeHtml(record.name)}" />
+    <div class="file-main"><span class="file-icon">▧</span><div><div class="file-name" title="${escapeHtml(record.name)}">${escapeHtml(record.name)}</div><span class="file-path" title="${escapeHtml(record.path)}">${escapeHtml(record.path)}</span><span class="file-hash${cachedClass}" title="${record.hash || ''}">sha256 ${hashLabel}</span></div></div>
+    <span class="file-size">${formatBytes(record.size)}</span>
+    <span class="file-date">${formatDate(record.modified)}</span>
+    <div class="file-actions"><button class="open-one" type="button" ${state.scanning && state.source === 'native' ? 'disabled' : ''}>Open</button>${isKeep ? '<span class="keep-label">Keep original</span>' : `<button class="delete-one" type="button" ${state.scanning ? 'disabled' : ''}>Delete</button>`}</div>
+  `;
+  row.querySelector('.open-one').addEventListener('click', () => openRecord(record));
+  if (!isKeep) {
+    const checkbox = row.querySelector('.file-check');
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) state.selected.add(record.id); else state.selected.delete(record.id);
+      updateStats();
+    });
+    row.querySelector('.delete-one').addEventListener('click', () => deleteRecords([record]));
+  }
+  return row;
+}
+
+function compareTreeRecords(first, second) {
+  let result = 0;
+  if (state.sortBy === 'largest') result = first.size - second.size;
+  else if (state.sortBy === 'modified') result = (first.modified || 0) - (second.modified || 0);
+  else if (state.sortBy === 'hash') result = String(first.hash || '').localeCompare(String(second.hash || ''));
+  else result = first.path.localeCompare(second.path, undefined, { numeric: true, sensitivity: 'base' });
+  if (!result) result = first.path.localeCompare(second.path, undefined, { numeric: true, sensitivity: 'base' });
+  return state.sortDirection === 'desc' ? -result : result;
+}
+
+function renderTreeView(visibleGroups) {
+  const root = { name: 'Selected location', children: new Map(), files: [] };
+  visibleGroups.forEach((group, groupIndex) => {
+    group.files.forEach((record, fileIndex) => {
+      const parts = record.path.split(/[\\/]/).filter(Boolean);
+      const fileName = parts.pop() || record.name;
+      let node = root;
+      parts.forEach((part) => {
+        if (!node.children.has(part)) node.children.set(part, { name: part, children: new Map(), files: [] });
+        node = node.children.get(part);
+      });
+      node.files.push({ record: { ...record, name: fileName }, isKeep: fileIndex === 0, groupIndex });
+    });
+  });
+
+  const renderNode = (node, container, isRoot = false) => {
+    if (isRoot) {
+      const rootLabel = document.createElement('div');
+      rootLabel.className = 'tree-root-label';
+      rootLabel.innerHTML = `<span class="tree-folder-icon">⌂</span><strong>${escapeHtml(node.name)}</strong><span class="tree-count">${visibleGroups.length} duplicate groups</span>`;
+      container.appendChild(rootLabel);
+    }
+    Array.from(node.children.values()).sort((a, b) => a.name.localeCompare(b.name)).forEach((child) => {
+      const details = document.createElement('details');
+      details.className = 'tree-node';
+      details.open = true;
+      const summary = document.createElement('summary');
+      const fileCount = child.files.length;
+      const childCount = child.children.size;
+      summary.innerHTML = `<span class="tree-folder-icon">⌂</span><span class="tree-folder-name">${escapeHtml(child.name)}</span><span class="tree-count">${fileCount + childCount} item${fileCount + childCount === 1 ? '' : 's'}</span>`;
+      const branch = document.createElement('div');
+      branch.className = 'tree-branch';
+      details.append(summary, branch);
+      container.appendChild(details);
+      renderNode(child, branch);
+    });
+    node.files.sort((a, b) => compareTreeRecords(a.record, b.record)).forEach(({ record, isKeep, groupIndex }) => {
+      const row = createFileRow(record, isKeep);
+      row.classList.add('tree-file-row');
+      const match = document.createElement('span');
+      match.className = 'tree-match';
+      match.textContent = `M${String(groupIndex + 1).padStart(2, '0')}`;
+      row.querySelector('.file-main').prepend(match);
+      container.appendChild(row);
+    });
+  };
+
+  renderNode(root, groupsList, true);
+}
+
 function renderGroups() {
   groupsList.innerHTML = '';
+  groupsList.classList.toggle('tree-results', state.viewMode === 'tree');
   const visibleGroups = getFilteredGroups();
   filtersBar.hidden = state.groups.length === 0;
   if (!state.groups.length || !visibleGroups.length) {
@@ -617,43 +728,24 @@ function renderGroups() {
   }
   emptyState.hidden = true;
   groupsList.hidden = false;
-  visibleGroups.forEach((group, groupIndex) => {
-    const duplicateFiles = group.files.slice(1);
-    const reclaimable = duplicateFiles.reduce((sum, file) => sum + file.size, 0);
-    const card = document.createElement('article');
-    card.className = 'group-card';
-    card.innerHTML = `
-      <div class="group-header">
-        <div class="group-title"><strong>Match ${String(groupIndex + 1).padStart(2, '0')}</strong><span class="hash">${group.hash.slice(0, 14)}…</span></div>
-        <div class="group-meta">${group.files.length} copies · ${formatBytes(reclaimable)} reclaimable</div>
-      </div>
-    `;
-    group.files.forEach((record, fileIndex) => {
-      const isKeep = fileIndex === 0;
-      const row = document.createElement('div');
-      row.className = `file-row${isKeep ? ' is-keep' : ''}`;
-      const hashLabel = record.hash ? `${record.hash.slice(0, 18)}…` : 'hash pending';
-      const cachedClass = record.cached ? ' cached' : '';
-      row.innerHTML = `
-        <input class="file-check" type="checkbox" ${isKeep || state.scanning ? 'disabled' : ''} ${state.selected.has(record.id) ? 'checked' : ''} aria-label="Select ${escapeHtml(record.name)}" />
-        <div class="file-main"><span class="file-icon">▧</span><div><div class="file-name" title="${escapeHtml(record.name)}">${escapeHtml(record.name)}</div><span class="file-path" title="${escapeHtml(record.path)}">${escapeHtml(record.path)}</span><span class="file-hash${cachedClass}" title="${record.hash || ''}">sha256 ${hashLabel}</span></div></div>
-        <span class="file-size">${formatBytes(record.size)}</span>
-        <span class="file-date">${formatDate(record.modified)}</span>
-        <div class="file-actions"><button class="open-one" type="button" ${state.scanning && state.source === 'native' ? 'disabled' : ''}>Open</button>${isKeep ? '<span class="keep-label">Keep original</span>' : `<button class="delete-one" type="button" ${state.scanning ? 'disabled' : ''}>Delete</button>`}</div>
+  if (state.viewMode === 'tree') {
+    renderTreeView(visibleGroups);
+  } else {
+    visibleGroups.forEach((group, groupIndex) => {
+      const duplicateFiles = group.files.slice(1);
+      const reclaimable = duplicateFiles.reduce((sum, file) => sum + file.size, 0);
+      const card = document.createElement('article');
+      card.className = 'group-card';
+      card.innerHTML = `
+        <div class="group-header">
+          <div class="group-title"><strong>Match ${String(groupIndex + 1).padStart(2, '0')}</strong><span class="hash">${group.hash.slice(0, 14)}…</span></div>
+          <div class="group-meta">${group.files.length} copies · ${formatBytes(reclaimable)} reclaimable</div>
+        </div>
       `;
-      row.querySelector('.open-one').addEventListener('click', () => openRecord(record));
-      if (!isKeep) {
-        const checkbox = row.querySelector('.file-check');
-        checkbox.addEventListener('change', () => {
-          if (checkbox.checked) state.selected.add(record.id); else state.selected.delete(record.id);
-          updateStats();
-        });
-        row.querySelector('.delete-one').addEventListener('click', () => deleteRecords([record]));
-      }
-      card.appendChild(row);
+      group.files.forEach((record, fileIndex) => card.appendChild(createFileRow(record, fileIndex === 0)));
+      groupsList.appendChild(card);
     });
-    groupsList.appendChild(card);
-  });
+  }
   updateStats();
 }
 
@@ -1005,12 +1097,32 @@ async function checkNativeScanner() {
 typeFilter.addEventListener('change', renderGroups);
 cacheFilter.addEventListener('change', renderGroups);
 locationFilter.addEventListener('input', renderGroups);
+sortFilter.addEventListener('change', () => {
+  state.sortBy = sortFilter.value;
+  renderGroups();
+});
+sortDirection.addEventListener('click', () => {
+  state.sortDirection = state.sortDirection === 'asc' ? 'desc' : 'asc';
+  sortDirection.textContent = state.sortDirection === 'asc' ? '↑ Ascending' : '↓ Descending';
+  sortDirection.setAttribute('aria-label', `Sort ${state.sortDirection === 'asc' ? 'ascending' : 'descending'}`);
+  renderGroups();
+});
 clearFilters.addEventListener('click', () => {
   typeFilter.value = 'all';
   locationFilter.value = '';
   cacheFilter.value = 'all';
   renderGroups();
 });
+function setViewMode(mode) {
+  state.viewMode = mode;
+  listViewButton.classList.toggle('active', mode === 'list');
+  treeViewButton.classList.toggle('active', mode === 'tree');
+  listViewButton.setAttribute('aria-pressed', mode === 'list');
+  treeViewButton.setAttribute('aria-pressed', mode === 'tree');
+  renderGroups();
+}
+listViewButton.addEventListener('click', () => setViewMode('list'));
+treeViewButton.addEventListener('click', () => setViewMode('tree'));
 scanButton.addEventListener('click', () => state.source === 'native' ? runNativeScan() : runScan());
 deleteButton.addEventListener('click', () => deleteRecords(getFilteredGroups().flatMap((group) => group.files.filter((file) => state.selected.has(file.id)))));
 clearButton.addEventListener('click', () => {
@@ -1029,4 +1141,6 @@ clearButton.addEventListener('click', () => {
 });
 
 updateStats();
+sortFilter.value = state.sortBy;
+sortDirection.textContent = '↑ Ascending';
 checkNativeScanner();
