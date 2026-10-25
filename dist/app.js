@@ -38,6 +38,16 @@ const sortFilter = $('sortFilter');
 const sortDirection = $('sortDirection');
 const listViewButton = $('listViewButton');
 const treeViewButton = $('treeViewButton');
+const selectionToolbar = $('selectionToolbar');
+const selectionCount = $('selectionCount');
+const selectionSpace = $('selectionSpace');
+const selectionScope = $('selectionScope');
+const selectAllButton = $('selectAllButton');
+const clearSelectionButton = $('clearSelectionButton');
+const quickDeleteButton = $('quickDeleteButton');
+const selectionPreview = $('selectionPreview');
+const selectionPreviewCount = $('selectionPreviewCount');
+const selectionPreviewList = $('selectionPreviewList');
 const NATIVE_SCANNER_URL = 'http://127.0.0.1:4317';
 let nativeAvailable = false;
 
@@ -226,6 +236,76 @@ function getFilteredGroups() {
     const matchesCache = cacheStatus === 'all' || (cacheStatus === 'cached' ? record.cached : !record.cached);
     return matchesType && matchesLocation && matchesCache;
   })).sort(compareGroups);
+}
+
+function getAllDuplicateRecords() {
+  return state.groups.flatMap((group) => group.files.slice(1));
+}
+
+function getVisibleDuplicateRecords() {
+  return getFilteredGroups().flatMap((group) => group.files.slice(1));
+}
+
+function getSelectedRecords() {
+  const recordsById = new Map(state.records.map((record) => [record.id, record]));
+  return Array.from(state.selected).map((id) => recordsById.get(id)).filter(Boolean);
+}
+
+function renderSelectionSummary() {
+  const allDuplicates = getAllDuplicateRecords();
+  const visibleDuplicates = getVisibleDuplicateRecords();
+  const selectedRecords = getSelectedRecords();
+  const selectedBytes = selectedRecords.reduce((total, record) => total + record.size, 0);
+  const visibleSelected = visibleDuplicates.filter((record) => state.selected.has(record.id));
+  const allVisibleSelected = visibleDuplicates.length > 0 && visibleSelected.length === visibleDuplicates.length;
+
+  selectionToolbar.hidden = state.groups.length === 0;
+  selectionCount.textContent = `${selectedRecords.length.toLocaleString()} selected`;
+  selectionSpace.textContent = `${formatBytes(selectedBytes)} to reclaim`;
+  selectionScope.textContent = state.groups.length
+    ? `${visibleDuplicates.length.toLocaleString()} visible copies · ${allDuplicates.length.toLocaleString()} total copies`
+    : '';
+  selectAllButton.textContent = allVisibleSelected && visibleDuplicates.length
+    ? 'Deselect visible'
+    : hasActiveFilters() ? 'Select visible copies' : 'Select all copies';
+  selectAllButton.disabled = !visibleDuplicates.length || state.scanning;
+  clearSelectionButton.disabled = selectedRecords.length === 0 || state.scanning;
+  quickDeleteButton.disabled = selectedRecords.length === 0 || state.scanning;
+
+  selectionPreview.hidden = selectedRecords.length === 0;
+  selectionPreviewCount.textContent = `${selectedRecords.length.toLocaleString()} file${selectedRecords.length === 1 ? '' : 's'} · ${formatBytes(selectedBytes)}`;
+  selectionPreviewList.innerHTML = '';
+  selectedRecords.slice(0, 8).forEach((record) => {
+    const item = document.createElement('span');
+    item.className = 'selection-preview-item';
+    item.title = record.path;
+    item.textContent = record.path;
+    selectionPreviewList.appendChild(item);
+  });
+  if (selectedRecords.length > 8) {
+    const more = document.createElement('span');
+    more.className = 'selection-preview-more';
+    more.textContent = `+ ${selectedRecords.length - 8} more`;
+    selectionPreviewList.appendChild(more);
+  }
+}
+
+function selectRecords(records) {
+  records.forEach((record) => state.selected.add(record.id));
+  renderGroups();
+}
+
+function deselectRecords(records) {
+  records.forEach((record) => state.selected.delete(record.id));
+  renderGroups();
+}
+
+function toggleGroupSelection(group) {
+  const duplicates = group.files.slice(1);
+  if (!duplicates.length) return;
+  const shouldSelect = duplicates.some((record) => !state.selected.has(record.id));
+  if (shouldSelect) selectRecords(duplicates);
+  else deselectRecords(duplicates);
 }
 
 async function chooseWithNativePicker() {
@@ -664,7 +744,7 @@ function chooseOriginal(files) {
 function updateStats() {
   const visibleGroups = getFilteredGroups();
   const duplicateRecords = visibleGroups.flatMap((group) => group.files.slice(1));
-  const selectedBytes = duplicateRecords.filter((record) => state.selected.has(record.id)).reduce((total, record) => total + record.size, 0);
+  const selectedBytes = getSelectedRecords().reduce((total, record) => total + record.size, 0);
   const filesFound = state.totalFilesFound ?? state.records.length;
   const folderBytes = state.storage.folderBytes ?? (state.source && state.source !== 'native' ? state.records.reduce((total, record) => total + record.size, 0) : null);
   $('filesStat').textContent = filesFound ? filesFound.toLocaleString() : '—';
@@ -681,7 +761,8 @@ function updateStats() {
   $('spaceStat').textContent = state.groups.length ? formatBytes(selectedBytes) : '—';
   $('groupCount').textContent = hasActiveFilters() ? `${visibleGroups.length}/${state.groups.length}` : state.groups.length;
   $('filterSummary').textContent = state.groups.length ? `${visibleGroups.length} of ${state.groups.length} groups` : '';
-  deleteButton.disabled = !duplicateRecords.some((record) => state.selected.has(record.id)) || state.scanning;
+  deleteButton.disabled = getSelectedRecords().length === 0 || state.scanning;
+  renderSelectionSummary();
 }
 
 function publishPartialResults(records, progress, force = false) {
@@ -753,7 +834,7 @@ function createFileRow(record, isKeep, keepReason = '') {
     const checkbox = row.querySelector('.file-check');
     checkbox.addEventListener('change', () => {
       if (checkbox.checked) state.selected.add(record.id); else state.selected.delete(record.id);
-      updateStats();
+      renderGroups();
     });
     row.querySelector('.set-original').addEventListener('click', () => setOriginalForRecord(record));
     row.querySelector('.delete-one').addEventListener('click', () => deleteRecords([record]));
@@ -866,9 +947,15 @@ function renderGroups() {
       card.innerHTML = `
         <div class="group-header">
           <div class="group-title"><strong>Match ${String(groupIndex + 1).padStart(2, '0')}</strong><span class="hash">${group.hash.slice(0, 14)}…</span></div>
-          <div class="group-meta">${group.files.length} copies · ${formatBytes(reclaimable)} reclaimable · keep: ${escapeHtml(group.originalReason || 'smart match')}</div>
+          <div class="group-header-right"><div class="group-meta">${group.files.length} copies · ${formatBytes(reclaimable)} reclaimable · keep: ${escapeHtml(group.originalReason || 'smart match')}</div><button class="group-select" type="button">Select copies</button></div>
         </div>
       `;
+      const groupSelect = card.querySelector('.group-select');
+      const groupDuplicates = group.files.slice(1);
+      const groupFullySelected = groupDuplicates.length > 0 && groupDuplicates.every((record) => state.selected.has(record.id));
+      groupSelect.textContent = groupFullySelected ? 'Deselect copies' : 'Select copies';
+      groupSelect.disabled = state.scanning;
+      groupSelect.addEventListener('click', () => toggleGroupSelection(group));
       group.files.forEach((record, fileIndex) => card.appendChild(createFileRow(record, fileIndex === 0, group.originalReason)));
       groupsList.appendChild(card);
     });
@@ -1192,7 +1279,8 @@ async function deleteNativeRecords(records) {
     }
   }
   state.groups = makeGroups(state.records);
-  state.groups.forEach((group) => group.files.slice(1).forEach((record) => state.selected.add(record.id)));
+  const remainingDuplicateIds = new Set(getAllDuplicateRecords().map((record) => record.id));
+  state.selected.forEach((id) => { if (!remainingDuplicateIds.has(id)) state.selected.delete(id); });
   renderGroups();
   setToast(deleted ? `${deleted} duplicate${deleted === 1 ? '' : 's'} deleted.` : 'No files were deleted.', deleted === 0);
 }
@@ -1221,7 +1309,8 @@ async function deleteRecords(records) {
     }
   }
   state.groups = makeGroups(state.records);
-  state.groups.forEach((group) => group.files.slice(1).forEach((record) => state.selected.add(record.id)));
+  const remainingDuplicateIds = new Set(getAllDuplicateRecords().map((record) => record.id));
+  state.selected.forEach((id) => { if (!remainingDuplicateIds.has(id)) state.selected.delete(id); });
   renderGroups();
   setToast(deleted ? `${deleted} duplicate${deleted === 1 ? '' : 's'} deleted.` : 'No files were deleted.', deleted === 0);
 }
@@ -1263,6 +1352,19 @@ clearFilters.addEventListener('click', () => {
   cacheFilter.value = 'all';
   renderGroups();
 });
+selectAllButton.addEventListener('click', () => {
+  const visibleDuplicates = getVisibleDuplicateRecords();
+  if (!visibleDuplicates.length) return;
+  const allVisibleSelected = visibleDuplicates.every((record) => state.selected.has(record.id));
+  if (allVisibleSelected) deselectRecords(visibleDuplicates);
+  else selectRecords(visibleDuplicates);
+});
+clearSelectionButton.addEventListener('click', () => {
+  state.selected.clear();
+  renderGroups();
+  setToast('Selection cleared. No files will be deleted.');
+});
+quickDeleteButton.addEventListener('click', () => deleteRecords(getSelectedRecords()));
 function setViewMode(mode) {
   state.viewMode = mode;
   listViewButton.classList.toggle('active', mode === 'list');
@@ -1274,7 +1376,7 @@ function setViewMode(mode) {
 listViewButton.addEventListener('click', () => setViewMode('list'));
 treeViewButton.addEventListener('click', () => setViewMode('tree'));
 scanButton.addEventListener('click', () => state.source === 'native' ? runNativeScan() : runScan());
-deleteButton.addEventListener('click', () => deleteRecords(getFilteredGroups().flatMap((group) => group.files.filter((file) => state.selected.has(file.id)))));
+deleteButton.addEventListener('click', () => deleteRecords(getSelectedRecords()));
 clearButton.addEventListener('click', () => {
   state.records = [];
   state.groups = [];

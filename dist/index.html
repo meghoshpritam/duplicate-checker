@@ -100,6 +100,25 @@
             </div>
           </div>
 
+          <div class="selection-toolbar" id="selectionToolbar" hidden>
+            <div class="selection-summary-copy">
+              <span class="selection-kicker">SELECTION</span>
+              <strong id="selectionCount">0 selected</strong>
+              <span id="selectionSpace">0 B to reclaim</span>
+              <span class="selection-scope" id="selectionScope"></span>
+            </div>
+            <div class="selection-actions">
+              <button class="selection-button" id="selectAllButton" type="button">Select all copies</button>
+              <button class="selection-button" id="clearSelectionButton" type="button">Deselect all</button>
+              <button class="button button-danger selection-delete" id="quickDeleteButton" type="button" disabled><span>×</span> Delete selected</button>
+            </div>
+          </div>
+
+          <div class="selection-preview" id="selectionPreview" hidden>
+            <div class="selection-preview-head"><span>SELECTED ITEMS</span><span id="selectionPreviewCount"></span></div>
+            <div class="selection-preview-list" id="selectionPreviewList"></div>
+          </div>
+
           <div class="filters-bar" id="filtersBar" hidden>
             <label>TYPE<select id="typeFilter"><option value="all">All types</option><option value="images">Images</option><option value="videos">Videos</option><option value="audio">Audio</option><option value="documents">Documents</option><option value="archives">Archives</option><option value="other">Other</option></select></label>
             <label>LOCATION<input id="locationFilter" type="search" placeholder="Folder or filename" /></label>
