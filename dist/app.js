@@ -661,6 +661,20 @@ async function openRecord(record) {
   }
 }
 
+async function openNativeRecord(record) {
+  try {
+    const response = await fetch(`${NATIVE_SCANNER_URL}/open`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: record.absolutePath }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    setToast(`Opened ${record.name} in the native app.`);
+  } catch (error) {
+    setToast(`Could not open ${record.name} in the native app: ${error.message || 'native open failed'}`, true);
+  }
+}
+
 function createFileRow(record, isKeep) {
   const row = document.createElement('div');
   row.className = `file-row${isKeep ? ' is-keep' : ''}`;
@@ -671,9 +685,10 @@ function createFileRow(record, isKeep) {
     <div class="file-main"><span class="file-icon">▧</span><div><div class="file-name" title="${escapeHtml(record.name)}">${escapeHtml(record.name)}</div><span class="file-path" title="${escapeHtml(record.path)}">${escapeHtml(record.path)}</span><span class="file-hash${cachedClass}" title="${record.hash || ''}">sha256 ${hashLabel}</span></div></div>
     <span class="file-size">${formatBytes(record.size)}</span>
     <span class="file-date">${formatDate(record.modified)}</span>
-    <div class="file-actions"><button class="open-one" type="button" aria-label="Open ${escapeHtml(record.name)} in a new tab" ${state.scanning && state.source === 'native' ? 'disabled' : ''}>Open tab</button>${isKeep ? '<span class="keep-label">Keep original</span>' : `<button class="set-original" type="button" aria-label="Set ${escapeHtml(record.name)} as original" ${state.scanning ? 'disabled' : ''}>Set original</button><button class="delete-one" type="button" ${state.scanning ? 'disabled' : ''}>Delete</button>`}</div>
+    <div class="file-actions"><button class="open-one" type="button" aria-label="Open ${escapeHtml(record.name)} in a new tab" ${state.scanning && state.source === 'native' ? 'disabled' : ''}>Open tab</button>${state.source === 'native' ? `<button class="open-native" type="button" aria-label="Open ${escapeHtml(record.name)} in the native app" ${state.scanning ? 'disabled' : ''}>Open app</button>` : ''}${isKeep ? '<span class="keep-label">Keep original</span>' : `<button class="set-original" type="button" aria-label="Set ${escapeHtml(record.name)} as original" ${state.scanning ? 'disabled' : ''}>Set original</button><button class="delete-one" type="button" ${state.scanning ? 'disabled' : ''}>Delete</button>`}</div>
   `;
   row.querySelector('.open-one').addEventListener('click', () => openRecord(record));
+  row.querySelector('.open-native')?.addEventListener('click', () => openNativeRecord(record));
   if (!isKeep) {
     const checkbox = row.querySelector('.file-check');
     checkbox.addEventListener('change', () => {
