@@ -158,6 +158,18 @@ func storageHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		payload["storageError"] = err.Error()
 	}
+	if r.URL.Query().Get("includeFolder") == "1" {
+		records, warnings, _ := collectFiles(path, nil)
+		var folderBytes int64
+		for _, record := range records {
+			folderBytes += record.Size
+		}
+		payload["folderBytes"] = folderBytes
+		payload["filesFound"] = len(records)
+		if len(warnings) > 0 {
+			payload["folderError"] = warnings[0].message
+		}
+	}
 	writeJSON(w, http.StatusOK, payload)
 }
 

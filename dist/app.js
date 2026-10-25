@@ -21,6 +21,7 @@ const folderInput = $('folderInput');
 const scanButton = $('scanButton');
 const clearButton = $('clearButton');
 const deleteButton = $('deleteButton');
+const refreshStorageButton = $('refreshStorageButton');
 const locationText = $('locationText');
 const locationDisplay = $('locationDisplay');
 const helperText = $('helperText');
@@ -203,19 +204,26 @@ function stopNativeStoragePolling() {
   nativeStoragePollTimer = null;
 }
 
-async function refreshNativeStorage() {
+async function refreshNativeStorage(includeFolder = false) {
   if (!nativeAvailable || state.source !== 'native' || !state.nativeRoot) return;
   try {
-    const response = await fetch(`${NATIVE_SCANNER_URL}/storage?path=${encodeURIComponent(state.nativeRoot)}`, { signal: AbortSignal.timeout(1800) });
+    const folderQuery = includeFolder ? '&includeFolder=1' : '';
+    const response = await fetch(`${NATIVE_SCANNER_URL}/storage?path=${encodeURIComponent(state.nativeRoot)}${folderQuery}`, { signal: AbortSignal.timeout(includeFolder ? 30000 : 1800) });
     if (!response.ok) throw new Error(await response.text());
     const result = await response.json();
     state.storage.diskTotalBytes = result.diskTotalBytes ?? null;
     state.storage.diskFreeBytes = result.diskFreeBytes ?? null;
+    if (includeFolder) {
+      state.storage.folderBytes = result.folderBytes ?? state.storage.folderBytes;
+      state.totalFilesFound = result.filesFound ?? state.totalFilesFound;
+    }
     state.storage.error = result.storageError || '';
     updateStats();
+    return result;
   } catch (error) {
     state.storage.error = error.message || 'storage information unavailable';
     updateStats();
+    return null;
   }
 }
 
@@ -223,6 +231,70 @@ function startNativeStoragePolling() {
   stopNativeStoragePolling();
   void refreshNativeStorage();
   nativeStoragePollTimer = window.setInterval(() => { void refreshNativeStorage(); }, 1500);
+}
+
+async function calculateBrowserFolderUsage(handle) {
+  let folderBytes = 0;
+  let filesFound = 0;
+  let skipped = 0;
+  const visit = async (directory) => {
+    try {
+      for await (const entry of directory.values()) {
+        if (entry.kind === 'directory') {
+          await visit(entry);
+          continue;
+        }
+        if (isSystemMetadataFile(entry.name)) continue;
+        try {
+          const file = await entry.getFile();
+          folderBytes += file.size;
+          filesFound += 1;
+        } catch (error) {
+          skipped += 1;
+        }
+      }
+    } catch (error) {
+      skipped += 1;
+    }
+  };
+  await visit(handle);
+  return { folderBytes, filesFound, skipped };
+}
+
+async function refreshStorageSnapshot() {
+  if (state.scanning) return;
+  if (!state.source) {
+    setToast('Choose a folder or drive before refreshing storage.', true);
+    return;
+  }
+  refreshStorageButton.disabled = true;
+  refreshStorageButton.innerHTML = '<span class="refresh-icon spinning">↻</span> Refreshing…';
+  try {
+    if (state.source === 'native') {
+      const result = await refreshNativeStorage(true);
+      if (!result) throw new Error(state.storage.error || 'native storage information unavailable');
+      setToast(result.folderError ? `Storage refreshed, but ${result.folderError}` : 'Drive space and folder size refreshed.');
+    } else if (state.source === 'picker' && state.folderHandle) {
+      const usage = await calculateBrowserFolderUsage(state.folderHandle);
+      state.storage.folderBytes = usage.folderBytes;
+      state.totalFilesFound = usage.filesFound;
+      state.storage.error = usage.skipped ? `${usage.skipped} item${usage.skipped === 1 ? '' : 's'} could not be read` : '';
+      updateStats();
+      setToast(usage.skipped ? `Folder size refreshed with ${usage.skipped} unreadable item${usage.skipped === 1 ? '' : 's'}.` : 'Folder size refreshed.');
+    } else {
+      const files = state.inputFiles || state.records;
+      state.storage.folderBytes = files.reduce((total, fileOrRecord) => total + (fileOrRecord.size || 0), 0);
+      state.totalFilesFound = files.length;
+      state.storage.error = '';
+      updateStats();
+      setToast('Folder size refreshed from the selected files.');
+    }
+  } catch (error) {
+    setToast(`Could not refresh storage: ${error.message || 'access was interrupted'}`, true);
+  } finally {
+    refreshStorageButton.disabled = state.scanning || !state.source;
+    refreshStorageButton.innerHTML = '<span class="refresh-icon">↻</span> Refresh space';
+  }
 }
 
 function renderReport({ status, title, detail, filesFound, reusedHashes, hashedCandidates, skippedItems, ignoredSystem, skippedBranches, issues = [] }) {
@@ -865,6 +937,7 @@ function updateStats() {
   $('filterSummary').textContent = state.groups.length ? `${visibleGroups.length} of ${state.groups.length} groups` : '';
   deleteButton.disabled = getSelectedRecords().length === 0 || state.scanning;
   clearCacheButton.disabled = state.scanning;
+  refreshStorageButton.disabled = state.scanning || !state.source;
   renderSelectionSummary();
 }
 
@@ -1486,6 +1559,7 @@ function setViewMode(mode) {
 listViewButton.addEventListener('click', () => setViewMode('list'));
 treeViewButton.addEventListener('click', () => setViewMode('tree'));
 scanButton.addEventListener('click', () => state.source === 'native' ? runNativeScan() : runScan());
+refreshStorageButton.addEventListener('click', refreshStorageSnapshot);
 deleteButton.addEventListener('click', () => deleteRecords(getSelectedRecords()));
 clearButton.addEventListener('click', () => {
   state.records = [];
