@@ -52,6 +52,7 @@ const selectionPreviewCount = $('selectionPreviewCount');
 const selectionPreviewList = $('selectionPreviewList');
 const NATIVE_SCANNER_URL = 'http://127.0.0.1:4317';
 let nativeAvailable = false;
+let nativeStoragePollTimer = null;
 
 const supportsDirectoryPicker = 'showDirectoryPicker' in window;
 const HASH_CACHE_DB = 'duplicate-check-cache';
@@ -197,6 +198,33 @@ function setProgress(text, percent) {
   $('progressBar').style.width = `${percent}%`;
 }
 
+function stopNativeStoragePolling() {
+  if (nativeStoragePollTimer) window.clearInterval(nativeStoragePollTimer);
+  nativeStoragePollTimer = null;
+}
+
+async function refreshNativeStorage() {
+  if (!nativeAvailable || state.source !== 'native' || !state.nativeRoot) return;
+  try {
+    const response = await fetch(`${NATIVE_SCANNER_URL}/storage?path=${encodeURIComponent(state.nativeRoot)}`, { signal: AbortSignal.timeout(1800) });
+    if (!response.ok) throw new Error(await response.text());
+    const result = await response.json();
+    state.storage.diskTotalBytes = result.diskTotalBytes ?? null;
+    state.storage.diskFreeBytes = result.diskFreeBytes ?? null;
+    state.storage.error = result.storageError || '';
+    updateStats();
+  } catch (error) {
+    state.storage.error = error.message || 'storage information unavailable';
+    updateStats();
+  }
+}
+
+function startNativeStoragePolling() {
+  stopNativeStoragePolling();
+  void refreshNativeStorage();
+  nativeStoragePollTimer = window.setInterval(() => { void refreshNativeStorage(); }, 1500);
+}
+
 function renderReport({ status, title, detail, filesFound, reusedHashes, hashedCandidates, skippedItems, ignoredSystem, skippedBranches, issues = [] }) {
   const safeIssues = issues.filter(Boolean);
   reportPanel.hidden = false;
@@ -231,6 +259,7 @@ function setFolderLabel(name, source) {
     : source === 'picker'
       ? 'Browser folder access is enabled for this session. Use the native helper for very large drives.'
       : 'Folder selected. Browser fallback results are read-only; choose the folder through the native helper for deletion.';
+  if (source === 'native') void refreshNativeStorage();
 }
 
 function escapeHtml(value) {
@@ -584,13 +613,20 @@ async function readDirectory(handle, parentPath, records, progress) {
         const cached = progress.cache.get(path);
         if (cached && cached.size === file.size && cached.modified === file.lastModified && cached.hash) {
           record.hash = cached.hash;
-          record.quickHash = cached.quickHash || null;
           record.cached = true;
           progress.reusedHashes += 1;
         }
         records.push(record);
         progress.count += 1;
+        progress.folderBytes += file.size;
         if (record.cached) publishPartialResults(records, progress);
+        if (progress.count % 25 === 0 || performance.now() - progress.lastStoragePaintAt >= 350) {
+          progress.lastStoragePaintAt = performance.now();
+          state.records = records;
+          state.totalFilesFound = progress.count;
+          state.storage.folderBytes = progress.folderBytes;
+          updateStats();
+        }
         if (progress.count % 25 === 0) {
           setProgress(`Found ${progress.count.toLocaleString()} files…`, Math.min(42, 6 + Math.log10(progress.count + 1) * 14));
           await pauseForUsb();
@@ -630,13 +666,23 @@ async function readInputFiles(files, records, progress) {
     const cached = progress.cache.get(path);
     if (cached && cached.size === file.size && cached.modified === file.lastModified && cached.hash) {
       record.hash = cached.hash;
-      record.quickHash = cached.quickHash || null;
       record.cached = true;
       progress.reusedHashes += 1;
     }
     records.push(record);
+    progress.count += 1;
+    progress.folderBytes += file.size;
     if (record.cached) publishPartialResults(records, progress);
-    if ((index + 1) % 25 === 0) await pauseForUsb();
+    if (progress.count % 25 === 0 || performance.now() - progress.lastStoragePaintAt >= 350) {
+      progress.lastStoragePaintAt = performance.now();
+      state.records = records;
+      state.totalFilesFound = progress.count;
+      state.storage.folderBytes = progress.folderBytes;
+      updateStats();
+    }
+    if (progress.count % 25 === 0) {
+      await pauseForUsb();
+    }
   }
 }
 
@@ -682,6 +728,10 @@ async function hashPotentialDuplicates(records, progress) {
   if (quickFailedSizes.size) {
     candidates.filter((record) => quickFailedSizes.has(record.size)).forEach((record) => fullCandidateMap.set(record.id, record));
   }
+  // A quick sample is only an optimization. New files sharing a size with a
+  // cached file are full-hashed so they cannot be missed by a sample mismatch.
+  const cachedSizes = new Set(candidates.filter((record) => record.hash).map((record) => record.size));
+  candidates.filter((record) => !record.hash && cachedSizes.has(record.size)).forEach((record) => fullCandidateMap.set(record.id, record));
   const fullCandidates = Array.from(fullCandidateMap.values());
   const newFullCandidates = fullCandidates.filter((record) => !record.hash);
   progress.fullHashCandidates = newFullCandidates.length;
@@ -698,7 +748,6 @@ async function hashPotentialDuplicates(records, progress) {
         path: record.path,
         size: record.size,
         modified: record.modified,
-        quickHash: record.quickHash,
         hash: record.hash,
         savedAt: Date.now(),
       });
@@ -800,11 +849,13 @@ function updateStats() {
   const folderBytes = state.storage.folderBytes ?? (state.source && state.source !== 'native' ? state.records.reduce((total, record) => total + record.size, 0) : null);
   $('filesStat').textContent = filesFound ? filesFound.toLocaleString() : '—';
   $('folderSizeStat').textContent = folderBytes == null ? (state.scanning && state.source === 'native' ? '…' : '—') : formatBytes(folderBytes);
-  $('folderSizeFoot').textContent = folderBytes == null ? 'after scan' : 'readable files';
+  $('folderSizeFoot').textContent = state.scanning ? 'updating live' : folderBytes == null ? 'after scan' : 'readable files';
   $('freeSpaceStat').textContent = state.storage.diskFreeBytes == null
     ? (state.storage.error ? 'N/A' : state.source === 'input' || state.source === 'picker' ? 'N/A' : '—')
     : formatBytes(state.storage.diskFreeBytes);
-  $('freeSpaceFoot').textContent = state.storage.diskFreeBytes == null
+  $('freeSpaceFoot').textContent = state.scanning && state.source === 'native'
+    ? 'refreshing live'
+    : state.storage.diskFreeBytes == null
     ? (state.storage.error ? 'storage info unavailable' : state.source ? 'browser mode' : 'selected drive')
     : state.storage.diskTotalBytes == null ? 'available on selected drive' : `available of ${formatBytes(state.storage.diskTotalBytes)}`;
   $('duplicatesStat').textContent = state.groups.length ? duplicateRecords.length.toLocaleString() : '—';
@@ -1034,7 +1085,7 @@ async function runScan() {
   deleteButton.disabled = true;
   setProgress('Preparing scan…', 4);
   const records = [];
-  const progress = { count: 0, skipped: 0, ignored: 0, skippedDirectories: 0, skippedExamples: [], directories: 0, quickCandidates: 0, quickIndex: 0, quickBytes: 0, fullHashCandidates: 0, hashCandidates: 0, hashIndex: 0, hashedCandidates: 0, hashTotalBytes: 0, hashedBytes: 0, reusedHashes: 0, cache: new Map(), rootId: rootCacheId(), lastPublishAt: 0, lastGroupSignature: '' };
+  const progress = { count: 0, folderBytes: 0, lastStoragePaintAt: 0, skipped: 0, ignored: 0, skippedDirectories: 0, skippedExamples: [], directories: 0, quickCandidates: 0, quickIndex: 0, quickBytes: 0, fullHashCandidates: 0, hashCandidates: 0, hashIndex: 0, hashedCandidates: 0, hashTotalBytes: 0, hashedBytes: 0, cache: new Map(), rootId: rootCacheId(), lastPublishAt: 0, lastGroupSignature: '' };
   try {
     try {
       progress.cache = await loadHashCache(progress.rootId);
@@ -1163,6 +1214,7 @@ async function runNativeScan() {
   state.scanning = true;
   state.records = [];
   state.groups = [];
+  state.storage.folderBytes = 0;
   state.selected.clear();
   state.originals.clear();
   state.nativeRecords = new Map();
@@ -1180,6 +1232,7 @@ async function runNativeScan() {
   deleteButton.disabled = true;
   nativeStatus.textContent = 'Scanning…';
   nativeStatus.className = 'native-status connected';
+  startNativeStoragePolling();
   setProgress('Connecting to native scanner…', 3);
 
   const records = [];
@@ -1221,10 +1274,11 @@ async function runNativeScan() {
           progress.lastProgressPaintAt = now;
         }
       } else if (event.type === 'storage') {
-        state.storage.folderBytes = event.folderBytes ?? null;
-        state.storage.diskTotalBytes = event.diskTotalBytes ?? null;
-        state.storage.diskFreeBytes = event.diskFreeBytes ?? null;
+        state.storage.folderBytes = event.folderBytes ?? state.storage.folderBytes;
+        state.storage.diskTotalBytes = event.diskTotalBytes ?? state.storage.diskTotalBytes;
+        state.storage.diskFreeBytes = event.diskFreeBytes ?? state.storage.diskFreeBytes;
         state.storage.error = event.storageError || '';
+        if (event.filesFound != null) state.totalFilesFound = event.filesFound;
         updateStats();
       } else if (event.type === 'warning') {
         progress.skipped += 1;
@@ -1306,6 +1360,7 @@ async function runNativeScan() {
     nativeStatus.className = 'native-status error';
     setToast('The native scan stopped. See the Scan Report below.', true);
   } finally {
+    stopNativeStoragePolling();
     state.scanning = false;
     $('liveStatus').innerHTML = '<i></i> Final results';
     renderGroups();
@@ -1375,14 +1430,14 @@ async function checkNativeScanner() {
     nativeAvailable = true;
     nativeStatus.textContent = `Native helper connected · ${info.workers || 1} workers`;
     nativeStatus.className = 'native-status connected';
-    cacheStatus.textContent = 'Browser and native hash history are available. Clear them to force a fresh check.';
+    cacheStatus.textContent = 'Every scan enumerates current files; only verified SHA-256 hashes are reused.';
     chooseButton.innerHTML = 'Choose folder / drive <span>↗</span>';
     if (!state.source) helperText.textContent = 'Native backend active. Choose a folder or whole drive; the Go backend will scan the selection.';
   } catch (error) {
     nativeAvailable = false;
     nativeStatus.textContent = 'Native helper not connected · start it from README';
     nativeStatus.className = 'native-status';
-    cacheStatus.textContent = 'Browser hash history is available. Start the native helper to clear its repo cache too.';
+    cacheStatus.textContent = 'Every scan enumerates current files; browser mode reuses only verified SHA-256 hashes.';
     chooseButton.innerHTML = 'Choose folder <span>↗</span>';
   }
 }

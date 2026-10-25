@@ -42,7 +42,6 @@ type cacheEntry struct {
 	Size     int64  `json:"size"`
 	Modified int64  `json:"modified"`
 	Hash     string `json:"hash"`
-	Quick    string `json:"quick"`
 	SavedAt  int64  `json:"savedAt"`
 }
 
@@ -97,6 +96,7 @@ var allowedDeletes = struct {
 func main() {
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/cache", cacheHandler)
+	http.HandleFunc("/storage", storageHandler)
 	http.HandleFunc("/pick", pickHandler)
 	http.HandleFunc("/scan", scanHandler)
 	http.HandleFunc("/delete", deleteHandler)
@@ -141,6 +141,24 @@ func cacheHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
+}
+
+func storageHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
+		return
+	}
+	totalBytes, freeBytes, err := diskSpace(path)
+	payload := map[string]any{"diskTotalBytes": totalBytes, "diskFreeBytes": freeBytes}
+	if err != nil {
+		payload["storageError"] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func pickHandler(w http.ResponseWriter, r *http.Request) {
@@ -230,31 +248,44 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	records, warnings, ignored := collectFiles(root)
+	lastStorageUpdate := time.Time{}
+	sendStorage := func(folderBytes int64, filesFound, ignored int) {
+		if !lastStorageUpdate.IsZero() && time.Since(lastStorageUpdate) < 350*time.Millisecond && filesFound > 0 {
+			return
+		}
+		lastStorageUpdate = time.Now()
+		diskTotalBytes, diskFreeBytes, storageErr := diskSpace(root)
+		storageEvent := event{Type: "storage", FilesFound: filesFound, Ignored: ignored, FolderBytes: folderBytes, DiskTotalBytes: diskTotalBytes, DiskFreeBytes: diskFreeBytes}
+		if storageErr != nil {
+			storageEvent.StorageError = storageErr.Error()
+		}
+		_ = send(storageEvent)
+	}
+	sendStorage(0, 0, 0)
+	records, warnings, ignored := collectFiles(root, func(folderBytes int64, filesFound, ignored int) {
+		sendStorage(folderBytes, filesFound, ignored)
+	})
 	initialWarningCount := len(warnings)
 	folderBytes := int64(0)
 	for _, record := range records {
 		folderBytes += record.Size
 	}
 	diskTotalBytes, diskFreeBytes, storageErr := diskSpace(root)
-	storageEvent := event{Type: "storage", FolderBytes: folderBytes, DiskTotalBytes: diskTotalBytes, DiskFreeBytes: diskFreeBytes}
-	if storageErr != nil {
-		storageEvent.StorageError = storageErr.Error()
-	}
-	_ = send(storageEvent)
+	sendStorage(folderBytes, len(records), ignored)
 	for _, warning := range warnings {
 		_ = send(event{Type: "warning", Path: warning.path, Message: warning.message})
 	}
 
 	sameSize := make(map[int64][]int)
+	cachedSizes := make(map[int64]bool)
 	reused := 0
 	for index := range records {
 		record := &records[index]
 		key := record.RelPath
 		if cached, ok := cache[key]; ok && cached.Size == record.Size && cached.Modified == record.Modified && cached.Hash != "" {
 			record.Hash = cached.Hash
-			record.Quick = cached.Quick
 			record.Cached = true
+			cachedSizes[record.Size] = true
 			reused++
 		} else {
 			sameSize[record.Size] = append(sameSize[record.Size], index)
@@ -268,7 +299,8 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 			delete(sameSize, size)
 		}
 	}
-	for size, all := range sizeBuckets(records) {
+	allSizeBuckets := sizeBuckets(records)
+	for size, all := range allSizeBuckets {
 		if len(all) > 1 {
 			sameSize[size] = all
 		}
@@ -335,6 +367,16 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// A new file must still be checked against cached files of the same size
+	// even when a short sample differs. The sample is an optimization, not a
+	// correctness gate for files whose full hash has not been verified yet.
+	for size := range cachedSizes {
+		for _, index := range allSizeBuckets[size] {
+			if records[index].Hash == "" {
+				fullIndexSet[index] = true
+			}
+		}
+	}
 	fullIndices := make([]int, 0, len(fullIndexSet))
 	for index := range fullIndexSet {
 		fullIndices = append(fullIndices, index)
@@ -366,7 +408,7 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		record := &records[result.Index]
 		record.Hash = result.Value
-		s.Changed[record.RelPath] = cacheEntry{Root: root, Path: record.RelPath, Size: record.Size, Modified: record.Modified, Hash: record.Hash, Quick: record.Quick, SavedAt: time.Now().UnixMilli()}
+		s.Changed[record.RelPath] = cacheEntry{Root: root, Path: record.RelPath, Size: record.Size, Modified: record.Modified, Hash: record.Hash, SavedAt: time.Now().UnixMilli()}
 		fullDone++
 		_ = send(event{Type: "file", Path: record.RelPath, AbsolutePath: record.AbsPath, Size: record.Size, Modified: record.Modified, Hash: record.Hash})
 		if fullDone%10 == 0 || fullDone == len(fullIndices) {
@@ -506,10 +548,12 @@ func openHandler(w http.ResponseWriter, r *http.Request) {
 
 type warning struct{ path, message string }
 
-func collectFiles(root string) ([]fileRecord, []warning, int) {
+func collectFiles(root string, onUpdate func(folderBytes int64, filesFound, ignored int)) ([]fileRecord, []warning, int) {
 	records := make([]fileRecord, 0)
 	warnings := make([]warning, 0)
 	ignored := 0
+	var folderBytes int64
+	lastUpdate := time.Time{}
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if entry != nil && entry.IsDir() {
@@ -539,10 +583,18 @@ func collectFiles(root string) ([]fileRecord, []warning, int) {
 			return nil
 		}
 		records = append(records, fileRecord{AbsPath: path, RelPath: filepath.ToSlash(rel), Size: info.Size(), Modified: info.ModTime().UnixMilli()})
+		folderBytes += info.Size()
+		if onUpdate != nil && (len(records)%128 == 0 || time.Since(lastUpdate) >= 350*time.Millisecond) {
+			lastUpdate = time.Now()
+			onUpdate(folderBytes, len(records), ignored)
+		}
 		return nil
 	})
 	if err != nil {
 		warnings = append(warnings, warning{root, err.Error()})
+	}
+	if onUpdate != nil {
+		onUpdate(folderBytes, len(records), ignored)
 	}
 	return records, warnings, ignored
 }
