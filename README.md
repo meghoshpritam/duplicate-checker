@@ -47,3 +47,5 @@ The scanner is designed for large removable drives: it first compares file sizes
 Every scan ends with a persistent report showing the outcome, files found, candidates hashed, skipped items, skipped folder branches, and representative read errors. Partial duplicate results remain visible when possible.
 
 The app also keeps a local IndexedDB hash index keyed by the selected root, relative file path, file size, and last-modified timestamp. On later scans, unchanged files reuse their stored hash and are marked `cached` in the results; changed or new files are checked again. Duplicate groups appear while the scan is still running, then switch to final results when complete.
+
+Known OS metadata such as macOS `._*` AppleDouble files, `.DS_Store`, `Thumbs.db`, and `desktop.ini` is ignored and reported separately instead of being treated as scan errors.

@@ -110,7 +110,7 @@ function setProgress(text, percent) {
   $('progressBar').style.width = `${percent}%`;
 }
 
-function renderReport({ status, title, detail, filesFound, reusedHashes, hashedCandidates, skippedItems, skippedBranches, issues = [] }) {
+function renderReport({ status, title, detail, filesFound, reusedHashes, hashedCandidates, skippedItems, ignoredSystem, skippedBranches, issues = [] }) {
   const safeIssues = issues.filter(Boolean);
   reportPanel.hidden = false;
   reportPanel.className = `report-panel status-${status}`;
@@ -121,6 +121,7 @@ function renderReport({ status, title, detail, filesFound, reusedHashes, hashedC
   $('reportReused').textContent = Number(reusedHashes || 0).toLocaleString();
   $('reportHashed').textContent = Number(hashedCandidates || 0).toLocaleString();
   $('reportSkipped').textContent = Number(skippedItems || 0).toLocaleString();
+  $('reportIgnored').textContent = Number(ignoredSystem || 0).toLocaleString();
   $('reportBranches').textContent = Number(skippedBranches || 0).toLocaleString();
   $('reportIssueCount').textContent = safeIssues.length ? `${safeIssues.length} shown` : '';
   const issueList = $('reportIssueList');
@@ -144,6 +145,11 @@ function setFolderLabel(name, source) {
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[character]));
+}
+
+function isSystemMetadataFile(name) {
+  const lowerName = name.toLowerCase();
+  return name.startsWith('._') || lowerName === '.ds_store' || lowerName === 'thumbs.db' || lowerName === 'desktop.ini';
 }
 
 chooseButton.addEventListener('click', async () => {
@@ -321,6 +327,10 @@ async function readDirectory(handle, parentPath, records, progress) {
         await readDirectory(entry, path, records, progress);
         continue;
       }
+      if (isSystemMetadataFile(entry.name)) {
+        progress.ignored += 1;
+        continue;
+      }
       try {
         const file = await entry.getFile();
         const record = {
@@ -363,6 +373,10 @@ async function readDirectory(handle, parentPath, records, progress) {
 async function readInputFiles(files, records, progress) {
   for (let index = 0; index < files.length; index += 1) {
     const file = files[index];
+    if (isSystemMetadataFile(file.name)) {
+      progress.ignored += 1;
+      continue;
+    }
     const path = file.webkitRelativePath || file.name;
     const record = {
       id: `file-${index}`,
@@ -563,7 +577,7 @@ async function runScan() {
   deleteButton.disabled = true;
   setProgress('Preparing scan…', 4);
   const records = [];
-  const progress = { count: 0, skipped: 0, skippedDirectories: 0, skippedExamples: [], directories: 0, quickCandidates: 0, quickIndex: 0, quickBytes: 0, fullHashCandidates: 0, hashCandidates: 0, hashIndex: 0, hashedCandidates: 0, hashTotalBytes: 0, hashedBytes: 0, reusedHashes: 0, cache: new Map(), rootId: rootCacheId(), lastPublishAt: 0, lastGroupSignature: '' };
+  const progress = { count: 0, skipped: 0, ignored: 0, skippedDirectories: 0, skippedExamples: [], directories: 0, quickCandidates: 0, quickIndex: 0, quickBytes: 0, fullHashCandidates: 0, hashCandidates: 0, hashIndex: 0, hashedCandidates: 0, hashTotalBytes: 0, hashedBytes: 0, reusedHashes: 0, cache: new Map(), rootId: rootCacheId(), lastPublishAt: 0, lastGroupSignature: '' };
   try {
     try {
       progress.cache = await loadHashCache(progress.rootId);
@@ -589,7 +603,7 @@ async function runScan() {
     renderGroups();
     clearButton.hidden = false;
     const skipped = progress.skipped + progress.skippedDirectories;
-    const filterSummary = `${progress.reusedHashes.toLocaleString()} unchanged hashes were reused. ${progress.quickCandidates ? `${progress.quickCandidates.toLocaleString()} same-size files were quick-checked; ${progress.fullHashCandidates.toLocaleString()} needed full hashing.` : 'No new same-size candidates needed hashing.'}`;
+    const filterSummary = `${progress.reusedHashes.toLocaleString()} unchanged hashes were reused. ${progress.quickCandidates ? `${progress.quickCandidates.toLocaleString()} same-size files were quick-checked; ${progress.fullHashCandidates.toLocaleString()} needed full hashing.` : 'No new same-size candidates needed hashing.'}${progress.ignored ? ` ${progress.ignored.toLocaleString()} OS metadata files were ignored.` : ''}`;
     if (skipped || progress.cacheWarning) {
       helperText.textContent = skipped
         ? `Scan complete. ${skipped.toLocaleString()} file${skipped === 1 ? '' : 's or folder branches'} could not be read and were skipped.`
@@ -605,6 +619,7 @@ async function runScan() {
         reusedHashes: progress.reusedHashes,
         hashedCandidates: progress.hashedCandidates,
         skippedItems: progress.skipped,
+        ignoredSystem: progress.ignored,
         skippedBranches: progress.skippedDirectories,
         issues,
       });
@@ -618,6 +633,7 @@ async function runScan() {
         reusedHashes: progress.reusedHashes,
         hashedCandidates: progress.hashedCandidates,
         skippedItems: 0,
+        ignoredSystem: progress.ignored,
         skippedBranches: 0,
       });
       setToast(state.groups.length ? `Found ${state.groups.length} duplicate group${state.groups.length === 1 ? '' : 's'}.` : 'No exact duplicates found. Nice and tidy.');
@@ -638,6 +654,7 @@ async function runScan() {
       reusedHashes: progress.reusedHashes,
       hashedCandidates: progress.hashedCandidates,
       skippedItems: progress.skipped,
+      ignoredSystem: progress.ignored,
       skippedBranches: progress.skippedDirectories,
       issues: [`Error: ${errorName}${errorMessage}`, ...progress.skippedExamples.slice(0, 8).map((path) => `Could not read: ${path}`)],
     });
@@ -708,7 +725,7 @@ async function runNativeScan() {
   setProgress('Connecting to native scanner…', 3);
 
   const records = [];
-  const progress = { lastPublishAt: 0, lastGroupSignature: '', skipped: 0, skippedExamples: [], reusedHashes: 0, quickCandidates: 0, fullHashCandidates: 0, hashedCandidates: 0 };
+  const progress = { lastPublishAt: 0, lastGroupSignature: '', skipped: 0, ignored: 0, skippedExamples: [], reusedHashes: 0, quickCandidates: 0, fullHashCandidates: 0, hashedCandidates: 0 };
   let doneEvent = null;
   try {
     const response = await fetch(`${NATIVE_SCANNER_URL}/scan`, {
@@ -765,6 +782,7 @@ async function runNativeScan() {
     progress.quickCandidates = doneEvent.quickCandidates || 0;
     progress.fullHashCandidates = doneEvent.fullCandidates || 0;
     progress.hashedCandidates = doneEvent.fullHashes || 0;
+    progress.ignored = doneEvent.ignored || 0;
     state.totalFilesFound = doneEvent.filesFound || 0;
     state.records = records;
     state.groups = makeGroups(records);
@@ -777,11 +795,12 @@ async function runNativeScan() {
     renderReport({
       status: skipped ? 'warning' : 'complete',
       title: skipped ? 'Native scan completed with warnings' : 'Native scan completed successfully',
-      detail: `${progress.reusedHashes.toLocaleString()} unchanged hashes were reused. ${progress.quickCandidates.toLocaleString()} same-size files were quick-checked; ${progress.hashedCandidates.toLocaleString()} full hashes were performed. ${skipped ? 'Some items could not be read, so results may be partial.' : 'All readable files were checked.'} No files were changed during the scan.`,
+      detail: `${progress.reusedHashes.toLocaleString()} unchanged hashes were reused. ${progress.quickCandidates.toLocaleString()} same-size files were quick-checked; ${progress.hashedCandidates.toLocaleString()} full hashes were performed.${progress.ignored ? ` ${progress.ignored.toLocaleString()} OS metadata files were ignored.` : ''} ${skipped ? 'Some items could not be read, so results may be partial.' : 'All readable files were checked.'} No files were changed during the scan.`,
       filesFound: state.totalFilesFound,
       reusedHashes: progress.reusedHashes,
       hashedCandidates: progress.hashedCandidates,
       skippedItems: skipped,
+      ignoredSystem: progress.ignored,
       skippedBranches: 0,
       issues,
     });
@@ -802,6 +821,7 @@ async function runNativeScan() {
       reusedHashes: progress.reusedHashes,
       hashedCandidates: progress.hashedCandidates,
       skippedItems: progress.skipped,
+      ignoredSystem: progress.ignored,
       skippedBranches: 0,
       issues: [error.message || 'Native scanner connection failed.', ...progress.skippedExamples.slice(0, 8)],
     });

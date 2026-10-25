@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -64,6 +65,7 @@ type event struct {
 	FullCandidates  int    `json:"fullCandidates,omitempty"`
 	FullHashes      int    `json:"fullHashes,omitempty"`
 	Skipped         int    `json:"skipped,omitempty"`
+	Ignored         int    `json:"ignored,omitempty"`
 	DurationMs      int64  `json:"durationMs,omitempty"`
 	Phase           string `json:"phase,omitempty"`
 	Current         int    `json:"current,omitempty"`
@@ -162,7 +164,7 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	records, warnings := collectFiles(root)
+	records, warnings, ignored := collectFiles(root)
 	initialWarningCount := len(warnings)
 	for _, warning := range warnings {
 		_ = send(event{Type: "warning", Path: warning.path, Message: warning.message})
@@ -278,7 +280,7 @@ func scanHandler(w http.ResponseWriter, r *http.Request) {
 		allowedDeletes.paths[records[index].AbsPath] = true
 	}
 	allowedDeletes.Unlock()
-	_ = send(event{Type: "done", Root: root, FilesFound: len(records), ReusedHashes: reused, QuickCandidates: len(quickIndices), FullCandidates: len(fullIndices), FullHashes: len(s.Changed), Skipped: len(warnings), DurationMs: time.Since(started).Milliseconds()})
+	_ = send(event{Type: "done", Root: root, FilesFound: len(records), ReusedHashes: reused, QuickCandidates: len(quickIndices), FullCandidates: len(fullIndices), FullHashes: len(s.Changed), Skipped: len(warnings), Ignored: ignored, DurationMs: time.Since(started).Milliseconds()})
 }
 
 func deleteHandler(w http.ResponseWriter, r *http.Request) {
@@ -316,9 +318,10 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 
 type warning struct{ path, message string }
 
-func collectFiles(root string) ([]fileRecord, []warning) {
+func collectFiles(root string) ([]fileRecord, []warning, int) {
 	records := make([]fileRecord, 0)
 	warnings := make([]warning, 0)
+	ignored := 0
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if entry != nil && entry.IsDir() {
@@ -327,7 +330,14 @@ func collectFiles(root string) ([]fileRecord, []warning) {
 			warnings = append(warnings, warning{path, walkErr.Error()})
 			return nil
 		}
-		if entry.IsDir() || !entry.Type().IsRegular() {
+		if entry.IsDir() {
+			return nil
+		}
+		if isSystemMetadataFile(entry.Name()) {
+			ignored++
+			return nil
+		}
+		if !entry.Type().IsRegular() {
 			return nil
 		}
 		info, infoErr := entry.Info()
@@ -346,7 +356,12 @@ func collectFiles(root string) ([]fileRecord, []warning) {
 	if err != nil {
 		warnings = append(warnings, warning{root, err.Error()})
 	}
-	return records, warnings
+	return records, warnings, ignored
+}
+
+func isSystemMetadataFile(name string) bool {
+	lowerName := strings.ToLower(name)
+	return strings.HasPrefix(name, "._") || lowerName == ".ds_store" || lowerName == "thumbs.db" || lowerName == "desktop.ini"
 }
 
 func sizeBuckets(records []fileRecord) map[int64][]int {

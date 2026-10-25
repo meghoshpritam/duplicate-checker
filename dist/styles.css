@@ -59,7 +59,7 @@ button:focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
 .results-header-actions { display: flex; align-items: center; gap: 12px; }
 .live-status { display: flex; align-items: center; gap: 6px; color: var(--green); font: 9px var(--mono); letter-spacing: .08em; text-transform: uppercase; }
 .live-status i { display: block; width: 6px; height: 6px; background: var(--green); border-radius: 50%; box-shadow: 0 0 8px var(--green); animation: pulse 1.4s ease-in-out infinite; }
-.report-metrics { grid-template-columns: repeat(5, 1fr); }
+.report-metrics { grid-template-columns: repeat(6, 1fr); }
 .file-hash { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--green-dim); font: 9px var(--mono); margin-top: 3px; }
 .file-hash.cached::after { content: ' · cached'; color: var(--green); }
 @keyframes pulse { 50% { opacity: .35; transform: scale(.75); } }
