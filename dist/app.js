@@ -7,6 +7,7 @@ const state = {
   scanning: false,
   toastTimer: null,
   totalFilesFound: null,
+  nativeRoot: '',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -22,10 +23,9 @@ const progressWrap = $('progressWrap');
 const reportPanel = $('reportPanel');
 const groupsList = $('groupsList');
 const emptyState = $('emptyState');
-const nativePathInput = $('nativePathInput');
-const nativeScanButton = $('nativeScanButton');
 const nativeStatus = $('nativeStatus');
 const NATIVE_SCANNER_URL = 'http://127.0.0.1:4317';
+let nativeAvailable = false;
 
 const supportsDirectoryPicker = 'showDirectoryPicker' in window;
 const HASH_CACHE_DB = 'duplicate-check-cache';
@@ -138,9 +138,12 @@ function setFolderLabel(name, source) {
   locationText.textContent = name;
   locationDisplay.classList.add('selected');
   scanButton.disabled = false;
-  helperText.textContent = source === 'picker'
-    ? 'Folder access is enabled for this session. You can delete duplicates after reviewing them.'
-    : 'Folder selected. Scan results are read-only in this browser fallback; use Choose folder in Chrome or Edge to enable deletion.';
+  scanButton.innerHTML = source === 'native' ? '<span class="button-icon">⌕</span> Start native scan' : '<span class="button-icon">⌕</span> Start browser scan';
+  helperText.textContent = source === 'native'
+    ? 'Native scanner selected. Start scan to read this folder or drive with the Go backend.'
+    : source === 'picker'
+      ? 'Browser folder access is enabled for this session. Use Fast USB Mode for large drives.'
+      : 'Folder selected. Browser fallback results are read-only; use Fast USB Mode for native deletion.';
 }
 
 function escapeHtml(value) {
@@ -152,11 +155,37 @@ function isSystemMetadataFile(name) {
   return name.startsWith('._') || lowerName === '.ds_store' || lowerName === 'thumbs.db' || lowerName === 'desktop.ini';
 }
 
+async function chooseWithNativePicker() {
+  const response = await fetch(`${NATIVE_SCANNER_URL}/pick`);
+  if (response.status === 409) {
+    setToast('Folder selection cancelled.');
+    return true;
+  }
+  if (!response.ok) throw new Error(await response.text());
+  const result = await response.json();
+  state.folderHandle = null;
+  state.inputFiles = [];
+  state.source = 'native';
+  state.nativeRoot = result.path;
+  setFolderLabel(result.path, 'native');
+  setToast('Native folder ready. Start the scan when you’re ready.');
+  return true;
+}
+
 chooseButton.addEventListener('click', async () => {
+  if (nativeAvailable) {
+    try {
+      await chooseWithNativePicker();
+      return;
+    } catch (error) {
+      setToast('Native folder picker is unavailable. Using the browser picker instead.', true);
+    }
+  }
   if (supportsDirectoryPicker) {
     try {
       const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
       state.folderHandle = handle;
+      state.nativeRoot = '';
       state.source = 'picker';
       setFolderLabel(handle.name, 'picker');
       setToast('Folder ready. Start a scan when you’re ready.');
@@ -173,6 +202,7 @@ folderInput.addEventListener('change', (event) => {
   if (!files.length) return;
   state.source = 'input';
   state.folderHandle = null;
+  state.nativeRoot = '';
   state.inputFiles = files;
   const root = files[0].webkitRelativePath?.split('/')[0] || 'Selected folder';
   setFolderLabel(root, 'input');
@@ -700,10 +730,9 @@ function nativeRecordFromEvent(event) {
 }
 
 async function runNativeScan() {
-  const requestedPath = nativePathInput.value.trim();
+  const requestedPath = state.nativeRoot.trim();
   if (!requestedPath) {
-    setToast('Enter the USB folder path first, for example /Volumes/My USB.', true);
-    nativePathInput.focus();
+    setToast('Choose a folder or drive first.', true);
     return;
   }
   if (state.scanning) return;
@@ -727,7 +756,6 @@ async function runNativeScan() {
   reportPanel.hidden = true;
   scanButton.disabled = true;
   deleteButton.disabled = true;
-  nativeScanButton.disabled = true;
   nativeStatus.textContent = 'Scanning…';
   nativeStatus.className = 'native-status connected';
   setProgress('Connecting to native scanner…', 3);
@@ -839,7 +867,6 @@ async function runNativeScan() {
   } finally {
     state.scanning = false;
     $('liveStatus').innerHTML = '<i></i> Final results';
-    nativeScanButton.disabled = false;
     renderGroups();
     updateStats();
     setTimeout(() => { progressWrap.hidden = true; }, 900);
@@ -902,25 +929,27 @@ async function checkNativeScanner() {
     const response = await fetch(`${NATIVE_SCANNER_URL}/health`, { signal: AbortSignal.timeout(1200) });
     if (!response.ok) throw new Error('offline');
     const info = await response.json();
+    nativeAvailable = true;
     nativeStatus.textContent = `Native helper connected · ${info.workers || 1} workers`;
     nativeStatus.className = 'native-status connected';
+    chooseButton.innerHTML = 'Choose folder / drive <span>↗</span>';
+    if (!state.source) helperText.textContent = 'Native backend active. Choose a folder or whole drive; the Go backend will scan the selection.';
   } catch (error) {
+    nativeAvailable = false;
     nativeStatus.textContent = 'Native helper not connected · start it from README';
     nativeStatus.className = 'native-status';
+    chooseButton.innerHTML = 'Choose folder <span>↗</span>';
   }
 }
 
-nativeScanButton.addEventListener('click', runNativeScan);
-nativePathInput.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter') runNativeScan();
-});
-scanButton.addEventListener('click', runScan);
+scanButton.addEventListener('click', () => state.source === 'native' ? runNativeScan() : runScan());
 deleteButton.addEventListener('click', () => deleteRecords(state.groups.flatMap((group) => group.files.filter((file) => state.selected.has(file.id)))));
 clearButton.addEventListener('click', () => {
   state.records = [];
   state.groups = [];
   state.selected.clear();
   state.inputFiles = [];
+  state.nativeRoot = '';
   state.totalFilesFound = null;
   reportPanel.hidden = true;
   $('liveStatus').hidden = true;

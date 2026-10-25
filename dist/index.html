@@ -65,20 +65,8 @@
             <button class="button button-secondary" id="chooseButton" type="button">Choose folder <span>↗</span></button>
             <input id="folderInput" type="file" webkitdirectory directory multiple hidden />
           </div>
-          <p class="helper-text" id="helperText">Choose a folder to scan every file inside it, including nested folders.</p>
-
-          <div class="native-scan-panel">
-            <div class="native-scan-copy">
-              <span class="native-badge">FAST USB MODE</span>
-              <strong>Use the local scanner for very large drives</strong>
-              <p>Runs outside the browser with parallel reads and repo-backed hash history.</p>
-            </div>
-            <div class="native-scan-controls">
-              <input id="nativePathInput" type="text" placeholder="/Volumes/My USB" aria-label="USB folder path" />
-              <button class="button button-secondary" id="nativeScanButton" type="button">Run native scan</button>
-            </div>
-            <span class="native-status" id="nativeStatus">Native helper not connected</span>
-          </div>
+          <p class="helper-text" id="helperText">Choose a folder or whole drive. With the native helper connected, the Go backend performs the scan.</p>
+          <div class="native-status-row"><span class="native-badge">NATIVE BACKEND</span><span class="native-status" id="nativeStatus">Native helper not connected</span><span class="native-status-hint">Choose folder / drive uses Go when connected.</span></div>
 
           <div class="scan-actions">
             <button class="button button-primary" id="scanButton" type="button" disabled>

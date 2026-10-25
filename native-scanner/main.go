@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -91,6 +92,7 @@ var allowedDeletes = struct {
 
 func main() {
 	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/pick", pickHandler)
 	http.HandleFunc("/scan", scanHandler)
 	http.HandleFunc("/delete", deleteHandler)
 
@@ -117,6 +119,48 @@ func withCORS(next http.Handler) http.Handler {
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "workers": workerCount()})
+}
+
+func pickHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
+		return
+	}
+	path, err := chooseDirectory()
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"path": path})
+}
+
+func chooseDirectory() (string, error) {
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		command = exec.Command("osascript", "-e", `POSIX path of (choose folder with prompt "Choose a folder or USB drive")`)
+	case "windows":
+		command = exec.Command("powershell", "-NoProfile", "-Command", `$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = 'Choose a folder or USB drive'; if ($dialog.ShowDialog() -eq 'OK') { $dialog.SelectedPath } else { exit 1 }`)
+	case "linux":
+		if zenity, err := exec.LookPath("zenity"); err == nil {
+			command = exec.Command(zenity, "--file-selection", "--directory", "--title=Choose a folder or USB drive")
+		} else if kdialog, err := exec.LookPath("kdialog"); err == nil {
+			command = exec.Command(kdialog, "--getexistingdirectory", ".", "Choose a folder or USB drive")
+		} else {
+			return "", fmt.Errorf("no native folder picker found; install zenity or kdialog")
+		}
+	default:
+		return "", fmt.Errorf("native folder picker is not supported on %s", runtime.GOOS)
+	}
+	output, err := command.Output()
+	if err != nil {
+		return "", fmt.Errorf("folder selection cancelled or failed")
+	}
+	path := strings.TrimSpace(string(output))
+	if path == "" {
+		return "", fmt.Errorf("folder selection cancelled")
+	}
+	return filepath.Clean(path), nil
 }
 
 func scanHandler(w http.ResponseWriter, r *http.Request) {
