@@ -41,6 +41,7 @@ const sortFilter = $('sortFilter');
 const sortDirection = $('sortDirection');
 const listViewButton = $('listViewButton');
 const treeViewButton = $('treeViewButton');
+const directoryViewButton = $('directoryViewButton');
 const selectionToolbar = $('selectionToolbar');
 const selectionCount = $('selectionCount');
 const selectionSpace = $('selectionSpace');
@@ -1090,9 +1091,80 @@ function renderTreeView(visibleGroups, totalGroups = visibleGroups.length) {
   renderNode(root, groupsList, true);
 }
 
+function recordDirectory(record) {
+  const parts = String(record.path || record.name || '').split(/[\\/]/).filter(Boolean);
+  parts.pop();
+  return parts.length ? parts.join('/') : 'Selected location';
+}
+
+function getDirectorySummaries(visibleGroups) {
+  const summaries = new Map();
+  visibleGroups.forEach((group) => {
+    group.files.slice(1).forEach((record) => {
+      const directory = recordDirectory(record);
+      if (!summaries.has(directory)) {
+        summaries.set(directory, { directory, duplicateFiles: 0, duplicateGroups: 0, selectedForDeletion: 0, reclaimableBytes: 0 });
+      }
+      const summary = summaries.get(directory);
+      summary.duplicateFiles += 1;
+      summary.reclaimableBytes += record.size || 0;
+      if (state.selected.has(record.id)) summary.selectedForDeletion += 1;
+    });
+    new Set(group.files.map(recordDirectory)).forEach((directory) => {
+      const summary = summaries.get(directory);
+      if (summary) summary.duplicateGroups += 1;
+    });
+  });
+  return Array.from(summaries.values()).sort((first, second) => first.directory.localeCompare(second.directory, undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+function keepOriginalsInDirectory(directory) {
+  let changedGroups = 0;
+  state.groups.forEach((group) => {
+    const candidates = group.files.filter((record) => recordDirectory(record) === directory);
+    if (!candidates.length) return;
+    const chosen = chooseOriginal(candidates).record;
+    state.originals.set(group.hash, chosen.id);
+    group.files = [chosen, ...group.files.filter((record) => record.id !== chosen.id)];
+    group.originalReason = `kept in ${directory}`;
+    group.files.forEach((record) => state.selected.delete(record.id));
+    group.files.slice(1).forEach((record) => state.selected.add(record.id));
+    changedGroups += 1;
+  });
+  if (!changedGroups) return;
+  renderGroups();
+  setToast(`Keeping originals from ${directory} for ${changedGroups} duplicate group${changedGroups === 1 ? '' : 's'}.`);
+}
+
+function renderDirectoryView(visibleGroups) {
+  const summaries = getDirectorySummaries(visibleGroups);
+  const duplicateFiles = summaries.reduce((total, summary) => total + summary.duplicateFiles, 0);
+  const selectedForDeletion = summaries.reduce((total, summary) => total + summary.selectedForDeletion, 0);
+  const header = document.createElement('div');
+  header.className = 'directory-summary-header';
+  header.innerHTML = `<div><span class="directory-summary-kicker">DIRECTORY BREAKDOWN</span><strong>${summaries.length.toLocaleString()} director${summaries.length === 1 ? 'y' : 'ies'}</strong></div><span>${duplicateFiles.toLocaleString()} duplicate files · ${selectedForDeletion.toLocaleString()} selected to delete</span>`;
+  groupsList.appendChild(header);
+
+  const table = document.createElement('div');
+  table.className = 'directory-summary-table';
+  const tableHeader = document.createElement('div');
+  tableHeader.className = 'directory-summary-row directory-summary-heading';
+  tableHeader.innerHTML = '<span>DIRECTORY</span><span>DUPLICATE FILES</span><span>SELECTED TO DELETE</span><span>RECLAIMABLE</span><span>ACTION</span>';
+  table.appendChild(tableHeader);
+  summaries.forEach((summary) => {
+    const row = document.createElement('div');
+    row.className = 'directory-summary-row';
+    row.innerHTML = `<span class="directory-name" title="${escapeHtml(summary.directory)}"><span class="tree-folder-icon">⌂</span>${escapeHtml(summary.directory)}</span><strong>${summary.duplicateFiles.toLocaleString()}</strong><strong class="directory-selected">${summary.selectedForDeletion.toLocaleString()}</strong><span class="directory-size">${formatBytes(summary.reclaimableBytes)}</span><button class="directory-keep" type="button" title="Keep the copy from this directory as original in ${summary.duplicateGroups} matching duplicate group${summary.duplicateGroups === 1 ? '' : 's'}">Keep originals here</button>`;
+    row.querySelector('.directory-keep').addEventListener('click', () => keepOriginalsInDirectory(summary.directory));
+    table.appendChild(row);
+  });
+  groupsList.appendChild(table);
+}
+
 function renderGroups() {
   groupsList.innerHTML = '';
   groupsList.classList.toggle('tree-results', state.viewMode === 'tree');
+  groupsList.classList.toggle('directory-results', state.viewMode === 'directory');
   const visibleGroups = getFilteredGroups();
   filtersBar.hidden = state.groups.length === 0;
   if (!state.groups.length || !visibleGroups.length) {
@@ -1112,7 +1184,9 @@ function renderGroups() {
     note.textContent = `Live preview: showing ${renderedGroups.length} of ${visibleGroups.length} groups. The complete result will appear when the scan finishes.`;
     groupsList.appendChild(note);
   }
-  if (state.viewMode === 'tree') {
+  if (state.viewMode === 'directory') {
+    renderDirectoryView(renderedGroups);
+  } else if (state.viewMode === 'tree') {
     renderTreeView(renderedGroups, visibleGroups.length);
   } else {
     renderedGroups.forEach((group, groupIndex) => {
@@ -1552,12 +1626,15 @@ function setViewMode(mode) {
   state.viewMode = mode;
   listViewButton.classList.toggle('active', mode === 'list');
   treeViewButton.classList.toggle('active', mode === 'tree');
+  directoryViewButton.classList.toggle('active', mode === 'directory');
   listViewButton.setAttribute('aria-pressed', mode === 'list');
   treeViewButton.setAttribute('aria-pressed', mode === 'tree');
+  directoryViewButton.setAttribute('aria-pressed', mode === 'directory');
   renderGroups();
 }
 listViewButton.addEventListener('click', () => setViewMode('list'));
 treeViewButton.addEventListener('click', () => setViewMode('tree'));
+directoryViewButton.addEventListener('click', () => setViewMode('directory'));
 scanButton.addEventListener('click', () => state.source === 'native' ? runNativeScan() : runScan());
 refreshStorageButton.addEventListener('click', refreshStorageSnapshot);
 deleteButton.addEventListener('click', () => deleteRecords(getSelectedRecords()));
